@@ -2,23 +2,17 @@ import type { NextFunction, Request, Response } from 'express';
 import fs from 'fs/promises';
 import path from 'path';
 import { Prisma } from '@prisma/client';
-import NodeCache from 'node-cache';
 import { db } from '../db';
 import HttpError from '../models/http-error';
 import { mimeMatchesExtension } from '../util/content-types';
 import { resolveAssetTarget } from '../util/paths';
-import { getHashedCluster } from '../util/upload-functions';
-
-const userCache = new NodeCache({ stdTTL: 300 });
-
-type AuthedRequest = Request & { apiKey?: string; userId?: string };
 
 async function removeFiles(files: Array<{ path: string }> | undefined) {
   if (!files) return;
   await Promise.all(files.map(async (file) => {
     try {
       await fs.unlink(file.path);
-    } catch (error) {
+    } catch {
       console.error('failed to delete upload', { path: file.path });
     }
   }));
@@ -46,55 +40,30 @@ function assetPathFromRequest(req: Request): string {
   return '';
 }
 
+function storedFile(file: Express.Multer.File) {
+  return {
+    originalName: file.originalname,
+    fileName: file.filename,
+    size: file.size,
+    mimeType: file.mimetype,
+    url: `/storage/${file.filename}`,
+  };
+}
+
 const uploadControllers = {
   getHealth: ((_req: Request, res: Response) => {
     res.status(200).send('online');
   }),
   uploadFile: (async (req: Request, res: Response, next: NextFunction) => {
-    const apiKey = req.header('X-API-Key') as string;
-    if (!apiKey) {
-      throw new HttpError('Missing API Key', 401);
-    }
-
-    let existingUser = userCache.get<{ id: string }>(apiKey);
-    if (!existingUser) {
-      existingUser = await db.user.findFirst({
-        where: {
-          apiKeys: {
-            some: {
-              key: apiKey,
-            },
-          },
-        },
-        select: {
-          id: true,
-        },
-        take: 1,
-      }) ?? undefined;
-
-      if (!existingUser) {
-        throw new HttpError('No user found', 404);
-      }
-      userCache.set(apiKey, existingUser);
-    }
-
     if (!req.file) {
-      return next(new HttpError('No file uploaded', 400));
+      next(new HttpError('No file uploaded', 400));
+      return;
     }
 
-    const cluster = getHashedCluster(apiKey, existingUser.id);
-    const fileUrl = `/storage/${cluster}/${req.file.filename}`;
+    const record = storedFile(req.file);
     try {
       const createdFile = await db.file.create({
-        data: {
-          originalName: req.file.originalname,
-          fileName: req.file.filename,
-          size: req.file.size,
-          appKey: apiKey,
-          mimeType: req.file.mimetype,
-          url: fileUrl,
-          createdById: existingUser.id,
-        },
+        data: record,
       });
       res.status(200).json({
         message: 'File uploaded successfully',
@@ -104,59 +73,23 @@ const uploadControllers = {
           originalName: req.file.originalname,
           size: req.file.size,
           mimetype: req.file.mimetype,
-          url: fileUrl,
+          url: record.url,
         }],
       });
-    } catch (err) {
+    } catch {
       console.error('upload metadata write failed');
       await removeFiles([req.file]);
       next(new HttpError('Failed to save files to database', 500));
     }
   }),
   bulkUpload: (async (req: Request, res: Response, next: NextFunction) => {
-    const apiKey = req.header('X-API-Key') as string;
-    if (!apiKey) {
-      throw new HttpError('Missing API Key', 401);
+    const uploaded = req.files as Express.Multer.File[] | undefined;
+    if (!uploaded || uploaded.length === 0) {
+      next(new HttpError('No files uploaded', 400));
+      return;
     }
 
-    let existingUser = userCache.get<{ id: string }>(apiKey);
-    if (!existingUser) {
-      const found = await db.user.findFirst({
-        where: {
-          apiKeys: {
-            some: {
-              key: apiKey,
-            },
-          },
-        },
-        select: {
-          id: true,
-        },
-        take: 1,
-      });
-
-      if (!found) {
-        throw new HttpError('No user found', 404);
-      }
-      existingUser = found;
-      userCache.set(apiKey, existingUser);
-    }
-
-    if (!req.files || (req.files as Express.Multer.File[]).length === 0) {
-      throw new HttpError('No files uploaded', 400);
-    }
-
-    const cluster = getHashedCluster(apiKey, existingUser.id);
-    const files = (req.files as Express.Multer.File[]).map((file) => ({
-      originalName: file.originalname,
-      fileName: file.filename,
-      size: file.size,
-      appKey: apiKey,
-      mimeType: file.mimetype,
-      url: `/storage/${cluster}/${file.filename}`,
-      createdById: existingUser.id,
-    }));
-
+    const files = uploaded.map(storedFile);
     try {
       await db.$transaction(async (prisma) => {
         await prisma.file.createMany({
@@ -173,20 +106,13 @@ const uploadControllers = {
           url,
         })),
       });
-    } catch (err) {
+    } catch {
       console.error('bulk upload metadata write failed');
-      await removeFiles(req.files as Express.Multer.File[]);
+      await removeFiles(uploaded);
       next(new HttpError('Failed to save files to database', 500));
     }
   }),
   uploadAsset: (async (req: Request, res: Response, next: NextFunction) => {
-    const authed = req as AuthedRequest;
-    const apiKey = authed.apiKey;
-    const userId = authed.userId;
-    if (!apiKey || !userId) {
-      next(new HttpError('Invalid API-KEY.', 403));
-      return;
-    }
     if (!req.file) {
       next(new HttpError('No file uploaded', 400));
       return;
@@ -208,7 +134,6 @@ const uploadControllers = {
           originalName: uploaded.originalname,
           fileName: target.relative,
           size: uploaded.size,
-          appKey: apiKey,
           mimeType: uploaded.mimetype,
           url: target.url,
         };
@@ -226,7 +151,7 @@ const uploadControllers = {
           return;
         }
         const created = await db.file.create({
-          data: { ...data, createdById: userId },
+          data,
           select: { id: true },
         });
         savedId = created.id;

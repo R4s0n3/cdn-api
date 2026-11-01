@@ -13,7 +13,7 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 COPY prisma ./prisma
 
-ENV DATABASE_URL=mysql://build:build@127.0.0.1:3306/cdn
+ENV DATABASE_URL=postgresql://build:build@127.0.0.1:5432/cdn
 
 RUN npm ci
 
@@ -22,7 +22,7 @@ COPY src ./src
 
 RUN npm run build \
   && npm prune --omit=dev \
-  && rm -rf node_modules/typescript node_modules/prisma node_modules/@types \
+  && rm -rf node_modules/typescript node_modules/@types \
   && npm cache clean --force \
   && node -e "const {PrismaClient}=require('@prisma/client'); if (typeof PrismaClient !== 'function') process.exit(1)"
 
@@ -37,7 +37,7 @@ ENV NODE_ENV=production \
 RUN apt-get update \
   && apt-get install -y --no-install-recommends openssl ca-certificates curl tini \
   && rm -rf /var/lib/apt/lists/* \
-  && mkdir -p /data/assets
+  && mkdir -p /data/assets /data/storage
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
@@ -53,7 +53,7 @@ EXPOSE 9001
 
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl --fail --silent "http://127.0.0.1:${PORT:-9001}/health" || exit 1
 
 ENTRYPOINT ["/usr/local/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]

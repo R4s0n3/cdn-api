@@ -6,7 +6,7 @@ import multer from 'multer';
 import { v7 as uuidV7 } from 'uuid';
 import { maxUploadBytes } from '../config';
 import { extensionForMime } from './content-types';
-import { clusterDirectory } from './paths';
+import { storageDirectory } from './paths';
 
 export const uploadLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -41,15 +41,9 @@ function uploadFileName(file: Express.Multer.File): string {
 }
 
 const storage = multer.diskStorage({
-  destination: (req, _file, cb) => {
+  destination: (_req, _file, cb) => {
     try {
-      const appKey = (req as Express.Request & { apiKey?: string }).apiKey;
-      const userId = (req as Express.Request & { userId?: string }).userId;
-      if (!appKey || !userId) {
-        cb(new Error('Missing API key'), '');
-        return;
-      }
-      cb(null, clusterDirectory(getHashedCluster(appKey, userId)));
+      cb(null, storageDirectory());
     } catch (error) {
       cb(error as Error, '');
     }
@@ -108,24 +102,3 @@ export const assetUpload = multer({
   },
   fileFilter,
 });
-
-export function getHashedCluster(str1: string, str2: string, saltStr: string = process.env.SALT_STRING || ''): string {
-  if (!saltStr) {
-    throw new Error('SALT_STRING is not set');
-  }
-
-  const combined = str1 + str2 + saltStr;
-
-  // Simple hash algorithm (FNV-1a). Kept stable so existing cluster directories stay valid.
-  let hash = 2166136261;
-
-  for (let i = 0; i < combined.length; i++) {
-    hash ^= combined.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-  }
-
-  hash = hash >>> 0;
-
-  const result = hash.toString(36).padStart(12, '0').slice(0, 12);
-  return result;
-}

@@ -59,10 +59,14 @@ export function isAllowedOrigin(origin: string): boolean {
 export function assertConfig(): void {
   const missing: string[] = [];
   if (!process.env.DATABASE_URL) missing.push('DATABASE_URL');
-  if (!process.env.SALT_STRING) missing.push('SALT_STRING');
+  if (!process.env.CDN_API_KEY) missing.push('CDN_API_KEY');
   if (!process.env.SERVER_ROOT) missing.push('SERVER_ROOT');
   if (missing.length > 0) {
     throw new Error(`Missing required environment: ${missing.join(', ')}`);
+  }
+  const databaseUrl = process.env.DATABASE_URL || '';
+  if (!databaseUrl.startsWith('postgresql://') && !databaseUrl.startsWith('postgres://')) {
+    throw new Error('DATABASE_URL must start with postgresql://');
   }
   serverRoot();
   port();

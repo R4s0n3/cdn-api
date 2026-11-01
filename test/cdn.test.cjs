@@ -6,48 +6,51 @@ const path = require('node:path');
 const { after, before, test } = require('node:test');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cdn-api-'));
-process.env.DATABASE_URL = 'mysql://user:pass@127.0.0.1:1/cdn?connect_timeout=1';
-process.env.SALT_STRING = 'test-salt-value';
+const apiKey = 'test-api-key-value';
+process.env.DATABASE_URL = 'postgresql://cdn:cdn@127.0.0.1:1/cdn?connect_timeout=1';
+process.env.CDN_API_KEY = apiKey;
 process.env.SERVER_ROOT = root;
 process.env.NODE_ENV = 'test';
 process.env.PORT = '9001';
 
 const { createApp } = require('../dist/app');
+const { apiKeysMatch } = require('../dist/util/api-key');
 const { extensionForMime } = require('../dist/util/content-types');
-const { getHashedCluster } = require('../dist/util/upload-functions');
-const { clusterDirectory, resolveAssetTarget } = require('../dist/util/paths');
+const { resolveAssetTarget, storageDirectory } = require('../dist/util/paths');
 
-const cluster = '000000jb5tqu';
 const storageName = 'photo.png';
-const legacyName = 'legacy.png';
 
 function write(file, contents) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, contents);
 }
 
-write(path.join(root, cluster, storageName), 'primary-png');
-write(path.join(root, 'storage', cluster, legacyName), 'legacy-png');
-write(path.join(root, 'storage', cluster, storageName), 'should-not-win');
+write(path.join(root, 'storage', storageName), 'primary-png');
 write(path.join(root, 'assets', 'merch', 'shirt.png'), 'shirt');
 write(path.join(root, 'assets', 'apps', 'logo.png'), 'logo');
 write(path.join(root, 'assets', 'apps', 'mark.svg'), '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
 write(path.join(root, 'assets', 'apps', 'note.html'), '<script>alert(1)</script>');
 write(path.join(root, 'assets', '.hidden'), 'secret');
+write(path.join(root, 'storage', '.hidden'), 'secret');
 write(path.join(root, 'secret.txt'), 'root-secret');
 fs.symlinkSync('/etc/passwd', path.join(root, 'assets', 'merch', 'escape.png'));
+fs.symlinkSync('/etc/passwd', path.join(root, 'storage', 'escape.png'));
 
 let server;
 
 function request(method, urlPath, headers = {}, body) {
   const address = server.address();
+  const finalHeaders = { ...headers };
+  if (body && !finalHeaders['content-length']) {
+    finalHeaders['content-length'] = body.length;
+  }
   return new Promise((resolve, reject) => {
     const req = http.request({
       method,
       host: '127.0.0.1',
       port: address.port,
       path: urlPath,
-      headers,
+      headers: finalHeaders,
     }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
@@ -65,6 +68,21 @@ function request(method, urlPath, headers = {}, body) {
   });
 }
 
+function pngBody() {
+  const boundary = '----cdntest';
+  const body = Buffer.concat([
+    Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="photo.png"\r\nContent-Type: image/png\r\n\r\n`,
+    ),
+    Buffer.from('not-really-a-png'),
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  return {
+    body,
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+  };
+}
+
 before(async () => {
   const app = createApp();
   server = await new Promise((resolve) => {
@@ -80,18 +98,19 @@ after(async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-test('hash directories stay stable for the same key, user, and salt', () => {
-  assert.equal(getHashedCluster('key', 'user', 'test-salt-value'), '000000jb5tqu');
-  assert.equal(getHashedCluster('key', 'user'), '000000jb5tqu');
-  assert.notEqual(getHashedCluster('key', 'user', 'other-salt'), '000000jb5tqu');
+test('api keys match only the configured value', () => {
+  assert.equal(apiKeysMatch(apiKey, apiKey), true);
+  assert.equal(apiKeysMatch('short', apiKey), false);
+  assert.equal(apiKeysMatch(`${apiKey}-extra`, apiKey), false);
+  assert.equal(apiKeysMatch('', apiKey), false);
   assert.equal(extensionForMime('image/jpeg'), 'jpg');
   assert.equal(extensionForMime('image/png'), 'png');
   assert.equal(extensionForMime('application/pdf'), 'pdf');
 });
 
-test('uploads are written to SERVER_ROOT/<cluster>', () => {
-  const dir = clusterDirectory('abcdef012345');
-  assert.equal(dir, path.join(root, 'abcdef012345'));
+test('uploads are written under SERVER_ROOT/storage', () => {
+  const dir = storageDirectory();
+  assert.equal(dir, path.join(root, 'storage'));
   assert.equal(fs.statSync(dir).isDirectory(), true);
 });
 
@@ -106,8 +125,8 @@ test('health and the legacy online route respond', async () => {
   assert.equal(online.body.toString(), 'online');
 });
 
-test('stored uploads are served from the URL the API returns', async () => {
-  const res = await request('GET', `/storage/${cluster}/${storageName}`, {
+test('stored uploads are served from /storage/<file>', async () => {
+  const res = await request('GET', `/storage/${storageName}`, {
     origin: 'https://miomideal.com',
   });
   assert.equal(res.status, 200);
@@ -118,22 +137,15 @@ test('stored uploads are served from the URL the API returns', async () => {
   assert.equal(res.headers['access-control-allow-origin'], 'https://miomideal.com');
   assert.match(res.headers.vary, /Origin/);
 
-  const head = await request('HEAD', `/storage/${cluster}/${storageName}`);
+  const head = await request('HEAD', `/storage/${storageName}`);
   assert.equal(head.status, 200);
   assert.equal(head.body.length, 0);
   assert.equal(head.headers['content-type'], 'image/png');
   assert.equal(head.headers['cache-control'], 'public, max-age=31536000, immutable');
 
-  const missing = await request('GET', `/storage/${cluster}/missing.png`);
+  const missing = await request('GET', '/storage/missing.png');
   assert.equal(missing.status, 404);
   assert.equal(missing.body.toString(), 'Not found');
-});
-
-test('a copied nginx storage directory still resolves', async () => {
-  const res = await request('GET', `/storage/${cluster}/${legacyName}`);
-  assert.equal(res.status, 200);
-  assert.equal(res.body.toString(), 'legacy-png');
-  assert.equal(res.headers['cache-control'], 'public, max-age=31536000, immutable');
 });
 
 test('asset tree is public with a revalidating cache', async () => {
@@ -170,9 +182,11 @@ test('directories, dotfiles, and paths outside the volume are not served', async
 
   const slash = await request('GET', '/assets/merch/');
   assert.equal(slash.status, 404);
+  assert.equal((await request('GET', '/storage')).status, 404);
 
   const hidden = await request('GET', '/assets/.hidden');
   assert.equal(hidden.status, 404);
+  assert.equal((await request('GET', '/storage/.hidden')).status, 404);
 
   const outside = await request('GET', '/secret.txt');
   assert.equal(outside.status, 404);
@@ -181,17 +195,15 @@ test('directories, dotfiles, and paths outside the volume are not served', async
   assert.equal(traversal.status, 404);
   assert.equal(traversal.body.toString().includes('root-secret'), false);
 
-  const encoded = await request('GET', '/storage/%2e%2e/%2e%2e/secret.txt');
+  const encoded = await request('GET', '/storage/%2e%2e/secret.txt');
   assert.equal(encoded.status, 404);
 
   const symlink = await request('GET', '/assets/merch/escape.png');
   assert.equal(symlink.status, 404);
   assert.equal(symlink.body.toString().includes('root:'), false);
-
-  const assetsViaStorage = await request('GET', '/assets/merch/shirt.png');
-  assert.equal(assetsViaStorage.status, 200);
-  const wrongPrefix = await request('GET', `/storage/assets/merch/shirt.png`);
-  assert.equal(wrongPrefix.status, 404);
+  const storageLink = await request('GET', '/storage/escape.png');
+  assert.equal(storageLink.status, 404);
+  assert.equal(storageLink.body.toString().includes('root:'), false);
 });
 
 test('disallowed browser origins can fetch bytes but cannot read them', async () => {
@@ -213,13 +225,21 @@ test('disallowed browser origins can fetch bytes but cannot read them', async ()
   assert.equal(insecure.headers['access-control-allow-origin'], undefined);
 });
 
-test('upload routes reject missing keys and do not accept other origins for CORS', async () => {
+test('upload routes require the CDN api key', async () => {
   const missing = await request('POST', '/api/upload/single');
   assert.equal(missing.status, 401);
   assert.match(missing.body.toString(), /API-KEY missing/);
 
   const asset = await request('POST', '/api/upload/asset');
   assert.equal(asset.status, 401);
+
+  const wrong = await request('POST', '/api/upload/single', {
+    'x-api-key': 'wrong-key',
+    origin: 'https://miomideal.com',
+  });
+  assert.equal(wrong.status, 403);
+  assert.equal(wrong.body.toString().includes(apiKey), false);
+  assert.equal(wrong.body.toString().includes('wrong-key'), false);
 
   const allowed = await request('OPTIONS', '/api/upload/single', {
     origin: 'https://www.miomideal.com',
@@ -232,8 +252,9 @@ test('upload routes reject missing keys and do not accept other origins for CORS
 
   const blocked = await request('POST', '/api/upload/single', {
     origin: 'https://evil.example',
+    'x-api-key': 'wrong-key',
   });
-  assert.equal(blocked.status, 401);
+  assert.equal(blocked.status, 403);
   assert.equal(blocked.headers['access-control-allow-origin'], undefined);
 });
 
@@ -252,15 +273,17 @@ test('asset paths stay inside the assets directory', () => {
 });
 
 test('a database outage does not echo the key or driver error', async () => {
+  const upload = pngBody();
   const res = await request('POST', '/api/upload/single', {
-    'x-api-key': 'super-secret-key',
+    ...upload.headers,
+    'x-api-key': apiKey,
     origin: 'https://miomideal.com',
-  });
+  }, upload.body);
   assert.equal(res.status, 500);
   const text = res.body.toString();
   assert.match(text, /unknown error/i);
-  assert.equal(text.includes('super-secret-key'), false);
-  assert.equal(/prisma|mysql|ECONNREFUSED/i.test(text), false);
+  assert.equal(text.includes(apiKey), false);
+  assert.equal(/prisma|postgres|ECONNREFUSED/i.test(text), false);
   assert.equal(res.headers['access-control-allow-origin'], 'https://miomideal.com');
 });
 

@@ -3,7 +3,7 @@ import path from 'path';
 import type { NextFunction, Request, Response } from 'express';
 import { isAllowedOrigin, serverRoot } from '../config';
 import { ASSET_CACHE_CONTROL, STORAGE_CACHE_CONTROL, publicFileHeaders } from '../util/content-types';
-import { isClusterName, isSafeFileName, resolveAssetFile, resolveStorageFile } from '../util/paths';
+import { isSafeFileName, resolveAssetFile, resolveStorageFile } from '../util/paths';
 
 function continueIfPublicRead(req: Request, res: Response, next: NextFunction) {
   const origin = req.header('origin');
@@ -68,12 +68,12 @@ function pathSegments(req: Request): string[] {
 export function storageFiles(req: Request, res: Response, next: NextFunction) {
   continueIfPublicRead(req, res, () => {
     const parts = pathSegments(req);
-    if (parts.length !== 2 || !isClusterName(parts[0]) || !isSafeFileName(parts[1])) {
+    if (parts.length !== 1 || !isSafeFileName(parts[0])) {
       notFound(res);
       return;
     }
 
-    const file = resolveStorageFile(parts[0], parts[1]);
+    const file = resolveStorageFile(parts[0]);
     if (!file) {
       notFound(res);
       return;

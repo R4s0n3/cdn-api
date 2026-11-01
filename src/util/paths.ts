@@ -4,13 +4,8 @@ import HttpError from '../models/http-error';
 import { serverRoot } from '../config';
 import { mimeMatchesExtension } from './content-types';
 
-const CLUSTER = /^[a-z0-9]{12}$/;
 const FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/;
 const MAX_ASSET_PATH = 180;
-
-export function isClusterName(value: string): boolean {
-  return CLUSTER.test(value);
-}
 
 export function isSafeFileName(value: string): boolean {
   return FILE_NAME.test(value) && !value.includes('..');
@@ -20,13 +15,11 @@ export function ensureStorageLayout(): void {
   const root = serverRoot();
   fs.mkdirSync(root, { recursive: true });
   fs.mkdirSync(path.join(root, 'assets'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'storage'), { recursive: true });
 }
 
-export function clusterDirectory(cluster: string): string {
-  if (!isClusterName(cluster)) {
-    throw new Error('Invalid storage cluster');
-  }
-  const dir = path.join(serverRoot(), cluster);
+export function storageDirectory(): string {
+  const dir = path.join(serverRoot(), 'storage');
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -110,12 +103,10 @@ export function resolveExistingFile(candidate: string, jailRoot: string): string
   return realTarget;
 }
 
-export function resolveStorageFile(cluster: string, filename: string): string | null {
-  if (!isClusterName(cluster) || !isSafeFileName(filename)) return null;
-  const root = serverRoot();
-  const primary = path.join(root, cluster, filename);
-  const legacy = path.join(root, 'storage', cluster, filename);
-  return resolveExistingFile(primary, root) ?? resolveExistingFile(legacy, root);
+export function resolveStorageFile(filename: string): string | null {
+  if (!isSafeFileName(filename)) return null;
+  const storageRoot = path.join(serverRoot(), 'storage');
+  return resolveExistingFile(path.join(storageRoot, filename), storageRoot);
 }
 
 export function resolveAssetFile(segments: string[]): string | null {
