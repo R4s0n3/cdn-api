@@ -27,26 +27,18 @@ const validateKey = async (
     (req as any).apiKey = existingApiKey.key;
     
     next();
-  } catch (error) {
-    console.error(error);
-    return next(new HttpError(`Internal server error... try again later. ${error}`, 500));
+  } catch {
+    console.error('Database error when checking API key');
+    return next(new HttpError('Internal server error. Try again later.', 500));
   }
 };
 
 export default validateKey;
 
 async function checkKey(apiKey: string) {
-  let existingApiKey; 
-  try {
-    existingApiKey = await db.apiKey.findUnique({
-      where: {
-        key: apiKey,
-      }
-    });
-
-  } catch (err) {
-    console.error('Database error when checking API key:', err);
-  }
-  return existingApiKey; // Returns the API key object or null if not found
-
+  return db.apiKey.findUnique({
+    where: {
+      key: apiKey,
+    },
+  });
 }

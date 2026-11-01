@@ -1,62 +1,25 @@
-import express from 'express';
-import type { Request, Response, NextFunction } from 'express'
-import rateLimit from 'express-rate-limit';
-import cors from 'cors'
+import 'dotenv/config';
+import { createApp } from './app';
+import { assertConfig, port, serverRoot } from './config';
+import { disconnectDb } from './db';
 
-import uploadRoutes from './routes/upload-routes'
-import HttpError from './models/http-error';
+assertConfig();
 
-const app = express()
-const port = 9001
+const app = createApp();
+const listenPort = port();
 
-const limiter = rateLimit({
-  windowMs: 6000 * 15, 
-  max: 100, 
-  message: 'Too many requests, please try again later.',
-  standardHeaders: true, 
-  legacyHeaders: false,
+const server = app.listen(listenPort, '0.0.0.0', () => {
+  console.log(`CDN listening on port ${listenPort}`);
+  console.log(`Storage root ${serverRoot()}`);
 });
 
-app.use(limiter);
-app.use(express.json())
-
-
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key']
-}));
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
-  }
-})
-
-app.get('/', (req: Request, res: Response, next: NextFunction) => {
-  res.send('online')
-})
-
-app.use('/api/upload', uploadRoutes)
-
-app.use((req: Request, res: Response, next: NextFunction)=>{
-    const error = new HttpError("Could not find this route", 404);
-    throw error;
-});
-
-app.use((error: HttpError, req: Request, res: Response, next: NextFunction) => {
-    if (res.headersSent) {
-      return next(error);
-    }
-
-    res.status(error.code || 500);
-    console.log("REQ_", req.body)
-    console.log("ERRO_", error)
-    res.json({ message: error.message || "An unknown error occurred!" });
+function shutdown(signal: string) {
+  console.log(`Received ${signal}, closing server`);
+  server.close(() => {
+    disconnectDb().finally(() => process.exit(0));
   });
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
 
-app.listen(port, () => {
-  console.log(`Server is running over ${port - 1}`)
-})
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
