@@ -1,15 +1,119 @@
-# upload
+# cdn-api
 
-To install dependencies:
+Public file CDN and upload API for [cdn.miomideal.com](https://cdn.miomideal.com). One process stores uploads and serves them. It uses its own PostgreSQL database. Previous media on the old host is not imported.
 
-```bash
-bun install
+| Method | Path | Auth | Result |
+| --- | --- | --- | --- |
+| `GET` | `/` | no | `online` |
+| `GET` | `/health` | no | `{ "status": "ok" }` |
+| `GET` | `/api/upload` | no | `online` |
+| `POST` | `/api/upload/single` | `X-API-Key` | one file, form field `file` |
+| `POST` | `/api/upload/bulk` | `X-API-Key` | up to 5 files, form field `files` |
+| `POST` | `/api/upload/asset` | `X-API-Key` | write a chosen `/assets/...` path |
+
+Upload URLs look like `/storage/<uuid>.jpg`. Asset URLs look like `/assets/merch/shirt.png`.
+
+```text
+https://cdn.miomideal.com/storage/<uuid>.jpg
+https://cdn.miomideal.com/assets/merch/shirt.png
+https://cdn.miomideal.com/assets/apps/logo.png
 ```
 
-To run:
+`/storage` objects use `Cache-Control: public, max-age=31536000, immutable` because each upload gets a new UUID file name. `/assets` objects use a one-day cache with `stale-while-revalidate`, because those names are overwritten in place. Directory listings are disabled.
 
-```bash
-bun run index.ts
+## Environment
+
+Set these on the container. `X-API-Key` must match `CDN_API_KEY`. The comparison uses a fixed-length digest.
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | `postgresql://cdn:<password>@<host>:5432/cdn` |
+| `CDN_API_KEY` | Long random secret |
+| `SERVER_ROOT` | `/data` |
+| `PORT` | `9001` |
+| `NODE_ENV` | `production` |
+
+`MAX_UPLOAD_BYTES` defaults to 52428800 (50 MiB), with a hard cap of 209715200. `CORS_ORIGINS` adds extra exact browser origins. `https://miomideal.com` and `https://*.miomideal.com` are always allowed.
+
+Copy `.env.example` to `.env` for local runs. Prisma reads `.env` during `npm run build`.
+
+Browser calls from miomideal.com (and its subdomains) may read responses. Other sites can still embed images. Localhost is allowed only when `NODE_ENV` is not `production`.
+
+Upload bodies must be JPEG, PNG, GIF, WebP, AVIF, SVG, or PDF. JPEG uploads are stored as `.jpg`. SVG is served with a locked-down content security policy. HTML placed on the volume by hand is downloaded as `application/octet-stream`. `/api/upload/single` allows 100 requests per 15 minutes, `/api/upload/bulk` allows 100 requests per hour, and the whole `/api` tree allows 100 requests per 90 seconds. File downloads are outside that API limit.
+
+## Volume
+
+Mount a persistent volume at `/data` and set `SERVER_ROOT=/data`.
+
+```text
+/data/storage/<uuid>.<ext>     uploads, served at /storage/<uuid>.<ext>
+/data/assets/merch/shirt.png   served at /assets/merch/shirt.png
+/data/assets/apps/logo.png     served at /assets/apps/logo.png
 ```
 
-This project was created using `bun init` in bun v1.2.5. [Bun](https://bun.sh) is a fast all-in-one JavaScript runtime.
+Asset names may use letters, numbers, `.`, `_`, and `-`. The process runs as root inside the container so files copied onto the volume stay writable. Run one replica.
+
+```bash
+docker cp ./assets/. <container-id>:/data/assets/
+```
+
+## Start command
+
+Migrations run before the server listens:
+
+```bash
+prisma migrate deploy && node dist/main.js
+```
+
+That is what `npm start` runs. The image entrypoint does the same thing, then executes the Docker command `node dist/main.js`. Leave Coolify's start command as the image default.
+
+## Coolify
+
+Create a PostgreSQL database the app can reach, then create this app with build pack **Dockerfile** and Dockerfile location `/Dockerfile`.
+
+1. **Ports Exposes:** `9001`. Leave port mappings empty.
+2. **Domains:** protocol `HTTPS`, domain `cdn.miomideal.com`, port `9001`. Leave Force HTTPS on. Leave HTTP Basic Auth off so public file URLs stay reachable.
+3. **Environment variables:**
+
+   ```text
+   DATABASE_URL=postgresql://cdn:<password>@<host>:5432/cdn
+   CDN_API_KEY=<long-random-secret>
+   SERVER_ROOT=/data
+   PORT=9001
+   NODE_ENV=production
+   ```
+
+   Mark `DATABASE_URL` and `CDN_API_KEY` as secrets. `PORT` must be `9001` so it matches Ports Exposes.
+
+4. **Persistent Storage:** Add → Volume Mount → destination path `/data`.
+5. **Health check:** method `GET`, scheme `http`, host `127.0.0.1`, port `9001`, path `/health`. The process listens on IPv4, so the host is `127.0.0.1`.
+6. Point DNS for `cdn.miomideal.com` at the Coolify server, then deploy.
+
+On startup the entrypoint creates `/data/assets` and `/data/storage`, applies `prisma/migrations`, then listens on `0.0.0.0:9001`. The first migration creates the `File` table.
+
+## Upload examples
+
+```bash
+curl -sS -X POST https://cdn.miomideal.com/api/upload/single \
+  -H "X-API-Key: $CDN_API_KEY" \
+  -F "file=@photo.jpg"
+
+curl -sS -X POST https://cdn.miomideal.com/api/upload/asset \
+  -H "X-API-Key: $CDN_API_KEY" \
+  -F "path=merch/shirt.png" \
+  -F "file=@shirt.png"
+```
+
+`path` may also be `/assets/merch/shirt.png`. Uploading the same asset path again replaces the file and updates its row. The response `url` is the public path.
+
+## Local build
+
+Requires Node.js 22. `prisma generate` does not connect to PostgreSQL. `npm test` checks serving, cache headers, traversal, and API key checks with the database down.
+
+```bash
+cp .env.example .env
+npm ci
+npm test
+```
+
+To boot against a real database, put its URL in `.env` and run `npm start`.

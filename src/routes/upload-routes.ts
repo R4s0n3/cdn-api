@@ -1,27 +1,30 @@
-import express from 'express'
-
-import uploadControllers from '../controllers/upload-controllers'
-import {uploadLimit, upload, strictUploadLimit} from "../util/upload-functions"
+import express from 'express';
+import uploadControllers from '../controllers/upload-controllers';
 import validateKey from '../middleware/validate-key';
-
+import { assetUpload, strictUploadLimit, upload, uploadLimit } from '../util/upload-functions';
 
 const router = express.Router();
 
 router.get('/', uploadControllers.getHealth);
 
-router.use(validateKey)
+router.use(validateKey);
 
 router.post('/single',
   uploadLimit,
   upload.single('file'),
-  uploadControllers.uploadFile
+  uploadControllers.uploadFile,
 );
 
-// Bulk upload endpoint with stricter rate limiting
 router.post('/bulk',
   strictUploadLimit,
-  upload.array('files', 5), 
-  uploadControllers.bulkUpload
+  upload.array('files', 5),
+  uploadControllers.bulkUpload,
+);
+
+router.post('/asset',
+  uploadLimit,
+  assetUpload.single('file'),
+  uploadControllers.uploadAsset,
 );
 
 export default router;
