@@ -1,62 +1,58 @@
-import express from 'express';
-import type { Request, Response, NextFunction } from 'express'
-import rateLimit from 'express-rate-limit';
-import cors from 'cors'
+import 'dotenv/config';
 
-import uploadRoutes from './routes/upload-routes'
-import HttpError from './models/http-error';
+import { createApp } from './app';
+import { getConfig } from './config';
+import { db } from './db';
+import { destroyObjectStorage } from './storage/s3-storage';
 
-const app = express()
-const port = 9001
-
-const limiter = rateLimit({
-  windowMs: 6000 * 15, 
-  max: 100, 
-  message: 'Too many requests, please try again later.',
-  standardHeaders: true, 
-  legacyHeaders: false,
-});
-
-app.use(limiter);
-app.use(express.json())
-
-
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization', 'X-API-Key']
-}));
-
-app.use((req: Request, res: Response, next: NextFunction) => {
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-  } else {
-    next();
+const config = getConfig();
+const app = createApp(config);
+const server = app.listen(config.port, config.host, (error?: Error) => {
+  if (error) {
+    console.error('Server failed to start', error);
+    process.exitCode = 1;
+    return;
   }
-})
 
-app.get('/', (req: Request, res: Response, next: NextFunction) => {
-  res.send('online')
-})
-
-app.use('/api/upload', uploadRoutes)
-
-app.use((req: Request, res: Response, next: NextFunction)=>{
-    const error = new HttpError("Could not find this route", 404);
-    throw error;
+  console.log(`Server is listening on http://${config.host}:${config.port}`);
 });
 
-app.use((error: HttpError, req: Request, res: Response, next: NextFunction) => {
-    if (res.headersSent) {
-      return next(error);
+let isShuttingDown = false;
+
+function shutdown(signal: NodeJS.Signals): void {
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
+  console.log(`Received ${signal}; shutting down`);
+
+  const forceShutdownTimer = setTimeout(() => {
+    console.error('Graceful shutdown timed out');
+    server.closeAllConnections();
+    process.exit(1);
+  }, 10000);
+  forceShutdownTimer.unref();
+
+  server.close(async (error) => {
+    let exitCode = error ? 1 : 0;
+
+    try {
+      if (error) {
+        console.error('Server shutdown failed', error);
+      }
+
+      await db.$disconnect();
+    } catch (disconnectError) {
+      exitCode = 1;
+      console.error('Database shutdown failed', disconnectError);
+    } finally {
+      destroyObjectStorage();
+      clearTimeout(forceShutdownTimer);
+      process.exit(exitCode);
     }
-
-    res.status(error.code || 500);
-    console.log("REQ_", req.body)
-    console.log("ERRO_", error)
-    res.json({ message: error.message || "An unknown error occurred!" });
   });
+}
 
-app.listen(port, () => {
-  console.log(`Server is running over ${port - 1}`)
-})
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

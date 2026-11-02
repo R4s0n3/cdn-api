@@ -1,25 +1,14 @@
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs'
-import { v7 as uuidV7 } from 'uuid'
+import fs from 'node:fs';
+import { promises as fsPromises } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { v7 as uuidV7 } from 'uuid';
 
-const SERVER_ROOT = process.env.SERVER_ROOT
+import { getConfig } from '../config';
+import HttpError from '../models/http-error';
 
-function makeTargetPath(cluster: string) {
-  const targetDir = path.join(__dirname, `../../../${SERVER_ROOT}/${cluster}/`);
-  // Ensure the target directory exists
-  if (!fs.existsSync(targetDir)) {
-    fs.mkdirSync(targetDir, { recursive: true });
-  }
-
-  return targetDir
-}
-// Calculate the target directory path
-
-
-
-// Different rate limits for different scenarios
 export const uploadLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -29,91 +18,118 @@ export const uploadLimit = rateLimit({
 });
 
 export const strictUploadLimit = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 100, // 50 uploads per hour
+  windowMs: 60 * 60 * 1000,
+  max: 100,
   message: 'Hourly upload limit reached, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-// Configure multer for file uploads
+const uploadTempDir =
+  process.env.UPLOAD_TEMP_DIR || path.join(os.tmpdir(), 'cdn-api-uploads');
+
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const appKey = (req as any).apiKey as string
-    const userId = (req as any).userId as string
-    const cluster = getHashedCluster(appKey, userId)
-    const uploadDir = makeTargetPath(cluster)
-    ensureDir(uploadDir)
-    cb(null, uploadDir) // Make sure this directory exists
+  destination: (_req, _file, callback) => {
+    fs.mkdir(uploadTempDir, { recursive: true }, (error) => {
+      callback(error, uploadTempDir);
+    });
   },
-  filename: (req, file, cb) => {
-    // Map MIME types to extensions
-    const mimeToExt: { [key: string]: string } = {
+  filename: (_req, file, callback) => {
+    const mimeToExtension: Record<string, string> = {
       'image/jpeg': 'jpg',
       'image/png': 'png',
-      'application/pdf': 'pdf'
+      'application/pdf': 'pdf',
     };
+    const extension = mimeToExtension[file.mimetype];
 
-    // Get extension from MIME type, fallback to originalname if needed
-    const ext = mimeToExt[file.mimetype];
-
-    cb(null, `${uuidV7()}.${ext}`)
-  }
+    callback(null, `${uuidV7()}.${extension}`);
+  },
 });
 
-// File filter to restrict file types
-const fileFilter = (req: Express.Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+const fileFilter = (
+  _req: Express.Request,
+  file: Express.Multer.File,
+  callback: multer.FileFilterCallback,
+) => {
   const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+
   if (allowedTypes.includes(file.mimetype)) {
-    cb(null, true);
+    callback(null, true);
   } else {
-    cb(new Error('Invalid file type. Only JPEG, PNG and PDF files are allowed.'));
+    callback(new HttpError('Only JPEG, PNG, and PDF files are allowed', 415));
   }
 };
 
 export const upload = multer({
-  storage: storage,
+  storage,
   limits: {
-    fileSize: 50 * 1024 * 1024, // 50MB file size limit
-    files: 5 // Only one file per request
+    fieldSize: 64 * 1024,
+    fields: 10,
+    fileSize: 50 * 1024 * 1024,
+    files: 5,
+    parts: 15,
   },
-  fileFilter: fileFilter
+  fileFilter,
 });
 
+export async function validateFileContents(file: Express.Multer.File): Promise<void> {
+  const handle = await fsPromises.open(file.path, 'r');
+  const header = Buffer.alloc(8);
 
-// Function to ensure directory exists
-/**
- * @param {fs.PathLike} dir
- */
+  try {
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    const bytes = header.subarray(0, bytesRead);
+    const isValid =
+      (file.mimetype === 'image/jpeg' &&
+        bytes.length >= 3 &&
+        bytes[0] === 0xff &&
+        bytes[1] === 0xd8 &&
+        bytes[2] === 0xff) ||
+      (file.mimetype === 'image/png' &&
+        bytes.length >= 8 &&
+        bytes.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) ||
+      (file.mimetype === 'application/pdf' &&
+        bytes.length >= 5 &&
+        bytes.subarray(0, 5).toString('ascii') === '%PDF-');
 
-function ensureDir(dir: fs.PathLike) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+    if (!isValid) {
+      throw new HttpError('File content does not match its declared type', 415);
+    }
+  } finally {
+    await handle.close();
   }
 }
 
-const SALT_STRING = process.env.SALT_STRING as string
+export async function removeTempFiles(files: Express.Multer.File[]): Promise<void> {
+  const results = await Promise.allSettled(files.map((file) => fsPromises.unlink(file.path)));
+  const failures = results.filter(
+    (result): result is PromiseRejectedResult =>
+      result.status === 'rejected' &&
+      (result.reason as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT',
+  );
+
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures.map((failure) => failure.reason),
+      `Failed to remove ${failures.length} temporary upload file(s)`,
+    );
+  }
+}
+
 export function getHashedCluster(
   str1: string,
   str2: string,
-  saltStr: string = SALT_STRING): string {
-  // Combine inputs
+  saltStr: string = getConfig().saltString,
+): string {
   const combined = str1 + str2 + saltStr;
-
-  // Simple hash algorithm (FNV-1a)
   let hash = 2166136261;
 
-  for (let i = 0; i < combined.length; i++) {
-    hash ^= combined.charCodeAt(i);
-    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  for (let index = 0; index < combined.length; index += 1) {
+    hash ^= combined.charCodeAt(index);
+    hash +=
+      (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
   }
 
-
-  // Convert to positive 32-bit integer
   hash = hash >>> 0;
-
-  // Convert to base36 (alphanumeric) and ensure 12 chars
-  let result = hash.toString(36).padStart(12, '0').slice(0, 12);
-
-  return result;
+  return hash.toString(36).padStart(12, '0').slice(0, 12);
 }

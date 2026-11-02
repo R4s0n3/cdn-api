@@ -1,52 +1,43 @@
-import type { Request, Response, NextFunction } from 'express';
+import { type NextFunction, type Request, type Response } from 'express';
+
 import { db } from '../db';
 import HttpError from '../models/http-error';
 
-
 const validateKey = async (
   req: Request,
-  res: Response,
-  next: NextFunction
-) => {
+  _res: Response,
+  next: NextFunction,
+): Promise<void> => {
   const apiKey = req.header('X-API-Key');
 
   if (!apiKey) {
-    const error = new HttpError('API-KEY missing.', 401);
-    return next(error);
+    next(new HttpError('API-KEY missing', 401));
+    return;
   }
 
   try {
-    const existingApiKey = await checkKey(apiKey);
+    const existingApiKey = await db.apiKey.findFirst({
+      where: {
+        key: apiKey,
+        deletedAt: null,
+      },
+    });
 
     if (!existingApiKey) {
-      const error = new HttpError('Invalid API-KEY.', 403);
-      return next(error);
+      next(new HttpError('Invalid API-KEY', 403));
+      return;
     }
 
-    (req as any).userId = existingApiKey.createdById;
-    (req as any).apiKey = existingApiKey.key;
-    
+    req.auth = {
+      userId: existingApiKey.createdById,
+      apiKey: existingApiKey.key,
+    };
+
     next();
   } catch (error) {
-    console.error(error);
-    return next(new HttpError(`Internal server error... try again later. ${error}`, 500));
+    console.error('Database error while validating API key', error);
+    next(new HttpError('Internal server error; try again later', 500));
   }
 };
 
 export default validateKey;
-
-async function checkKey(apiKey: string) {
-  let existingApiKey; 
-  try {
-    existingApiKey = await db.apiKey.findUnique({
-      where: {
-        key: apiKey,
-      }
-    });
-
-  } catch (err) {
-    console.error('Database error when checking API key:', err);
-  }
-  return existingApiKey; // Returns the API key object or null if not found
-
-}
