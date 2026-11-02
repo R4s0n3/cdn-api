@@ -197,9 +197,10 @@ describe('normative install-guide TypeScript client', () => {
       },
       {
         name: 'second.png',
-        blob: new Blob([
-          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-        ], { type: 'image/png' }),
+        blob: new Blob(
+          [Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+          { type: 'image/png' },
+        ),
       },
     ]);
 
@@ -222,11 +223,14 @@ describe('normative install-guide TypeScript client', () => {
       expect(request?.body).toBeInstanceOf(FormData);
     }
 
-    const singleFields = [
-      ...((singleCall?.[1]?.body as FormData).keys()),
-    ];
-    const bulkFields = [...((bulkCall?.[1]?.body as FormData).keys())];
+    const singleFields = [...(singleCall?.[1]?.body as FormData).keys()];
+    const bulkFields = [...(bulkCall?.[1]?.body as FormData).keys()];
     expect(singleFields).toEqual(['file']);
+    const singleFile = (singleCall?.[1]?.body as FormData).get('file') as File;
+    expect(singleFile.name).toBe('photo.jpg');
+    expect(new Uint8Array(await singleFile.arrayBuffer())).toEqual(
+      Uint8Array.from([0xff, 0xd8, 0xff]),
+    );
     expect(bulkFields).toEqual(['files', 'files']);
     expect(singleResult.files[0]?.url).toBe(
       'https://cdn-api.example.com/storage/cluster/generated.jpg',
@@ -235,6 +239,26 @@ describe('normative install-guide TypeScript client', () => {
       'https://objects.example.com/cluster/first.pdf',
       'https://cdn-api.example.com/storage/cluster/second.png',
     ]);
+  });
+
+  it('rejects cleartext remote origins before sending credentials', () => {
+    const clientModule = compileClient(
+      extractClientSource(loadInstallGuide('https://cdn-api.example.com').body),
+    );
+    expect(() =>
+      clientModule.createCdnClient({
+        baseUrl: 'http://remote.example.com',
+        apiKey: 'secret',
+      }),
+    ).toThrow('HTTPS');
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      expect(() =>
+        clientModule.createCdnClient({
+          baseUrl: `http://${host}:9001`,
+          apiKey: 'secret',
+        }),
+      ).not.toThrow();
+    }
   });
 
   it.each([401, 403, 413, 415, 429, 502])(
@@ -289,18 +313,17 @@ describe('normative install-guide TypeScript client', () => {
 
   it('rejects malformed success responses and invalid local upload inputs', async () => {
     const clientModule = compileClient(
-      extractClientSource(
-        loadInstallGuide('https://cdn-api.example.com').body,
-      ),
+      extractClientSource(loadInstallGuide('https://cdn-api.example.com').body),
     );
     const malformedClient = clientModule.createCdnClient({
       baseUrl: 'https://cdn-api.example.com',
       apiKey: 'project-key',
-      fetchImpl: vi.fn(async () =>
-        new Response('not-json', {
-          status: 200,
-          headers: { 'Content-Type': 'text/plain' },
-        }),
+      fetchImpl: vi.fn(
+        async () =>
+          new Response('not-json', {
+            status: 200,
+            headers: { 'Content-Type': 'text/plain' },
+          }),
       ),
     });
 

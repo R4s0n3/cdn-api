@@ -1,5 +1,5 @@
+import { getUploadTempDirectory } from './upload-staging';
 import fs from 'fs';
-import os from 'os';
 import path from 'path';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
@@ -73,7 +73,7 @@ export const upload = multer({
 });
 
 function assetTempDir(): string {
-  const dir = path.join(os.tmpdir(), 'cdn-api-uploads');
+  const dir = getUploadTempDirectory();
   fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

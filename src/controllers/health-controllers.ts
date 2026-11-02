@@ -2,13 +2,34 @@ import { type Request, type Response } from 'express';
 
 import { getConfig } from '../config';
 import { db } from '../db';
+import { checkUploadStaging } from '../util/upload-staging';
 import { getObjectStorage } from '../storage/s3-storage';
 
+/** Report process liveness without querying external dependencies. */
 export function getLiveness(_req: Request, res: Response): void {
   res.status(200).json({ status: 'ok' });
 }
 
-export async function getReadiness(_req: Request, res: Response): Promise<void> {
+let databaseProbe: Promise<unknown> | undefined;
+
+/** Allow only one outstanding readiness query, including after its HTTP timeout. */
+function checkDatabase(): Promise<unknown> {
+  if (databaseProbe)
+    throw new Error('Previous readiness database probe is still running');
+  const probe = Promise.resolve().then(() => db.$queryRawUnsafe('SELECT 1'));
+  databaseProbe = probe;
+  const clear = () => {
+    if (databaseProbe === probe) databaseProbe = undefined;
+  };
+  void probe.then(clear, clear);
+  return probe;
+}
+
+/** Check database, bucket, and writable staging within the configured response deadline. */
+export async function getReadiness(
+  _req: Request,
+  res: Response,
+): Promise<void> {
   const timeoutMs = getConfig().readinessTimeoutMs;
   const abortController = new AbortController();
   let timeout: NodeJS.Timeout | undefined;
@@ -23,7 +44,8 @@ export async function getReadiness(_req: Request, res: Response): Promise<void> 
   try {
     await Promise.race([
       Promise.all([
-        db.$queryRawUnsafe('SELECT 1'),
+        checkDatabase(),
+        checkUploadStaging(),
         getObjectStorage().checkBucket(abortController.signal),
       ]),
       deadline,

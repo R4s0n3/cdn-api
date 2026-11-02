@@ -23,7 +23,7 @@ describe('loadConfig', () => {
 
     expect(config.port).toBe(9001);
     expect(config.host).toBe('0.0.0.0');
-    expect(config.trustProxy).toBe(1);
+    expect(config.trustProxy).toBe(0);
     expect(config.publicApiBaseUrl).toBe('https://cdn-api.example.com');
     expect(config.s3.endpoint).toBe('https://nbg1.your-objectstorage.com');
     expect(config.s3.forcePathStyle).toBe(false);

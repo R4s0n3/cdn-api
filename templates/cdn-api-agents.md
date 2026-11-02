@@ -164,6 +164,9 @@ function parseApiOrigin(rawBaseUrl: string): string {
   ) {
     throw new Error('CDN_API_BASE_URL must be an HTTP(S) origin');
   }
+  if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+    throw new Error('Remote CDN origins must use HTTPS');
+  }
   return url.origin;
 }
 

@@ -22,6 +22,7 @@ const booleanValue = z.preprocess(
     .transform((value) => value === true || value === 'true'),
 );
 
+/** Reject URL paths, credentials, and fragments before normalizing a public origin. */
 function hasOnlyOriginComponents(value: string): boolean {
   return /^[a-z][a-z\d+.-]*:\/\/[^/?#\\]+\/?$/i.test(value);
 }
@@ -36,7 +37,7 @@ const envSchema = z
     PUBLIC_API_BASE_URL: urlValue,
     DATABASE_URL: z.string().min(1),
     SALT_STRING: z.string().min(1),
-    TRUST_PROXY: z.string().default('1'),
+    TRUST_PROXY: z.string().default('0'),
     S3_ENDPOINT: urlValue,
     S3_REGION: z.string().min(1),
     S3_BUCKET: z
@@ -210,26 +211,23 @@ export type AppConfig = {
   };
 };
 
-function parseTrustProxy(value: string): boolean | number | string {
-  if (value === 'true') {
-    return true;
-  }
-
-  if (value === 'false') {
-    return false;
-  }
-
-  if (/^\d+$/.test(value)) {
+/** Trust no forwarding headers by default; accept only an explicit proxy hop count. */
+export function parseTrustProxy(
+  value: string = process.env.TRUST_PROXY || '0',
+): false | number {
+  if (value === 'false') return false;
+  if (/^\d+$/.test(value) && Number.isSafeInteger(Number(value)))
     return Number(value);
-  }
-
-  return value;
+  throw new Error(
+    'TRUST_PROXY must be false or a non-negative proxy hop count',
+  );
 }
 
 function trimTrailingSlashes(value: string): string {
   return value.replace(/\/+$/, '');
 }
 
+/** Normalize an S3 namespace while rejecting traversal segments. */
 function normalizeKeyPrefix(value: string): string {
   const prefix = value.trim().replace(/^\/+|\/+$/g, '');
 
@@ -244,6 +242,7 @@ function normalizeKeyPrefix(value: string): string {
   return prefix;
 }
 
+/** Validate and normalize the complete configuration required when S3 mode is enabled. */
 export function loadConfig(
   environment: NodeJS.ProcessEnv = process.env,
 ): AppConfig {
@@ -289,6 +288,7 @@ export function loadConfig(
 
 let cachedConfig: AppConfig | undefined;
 
+/** Cache validated S3 configuration for storage and readiness operations. */
 export function getConfig(): AppConfig {
   cachedConfig ??= loadConfig();
   return cachedConfig;
@@ -369,6 +369,7 @@ export function assertConfig(): void {
   ) {
     throw new Error('DATABASE_URL must start with postgresql://');
   }
+  parseTrustProxy();
   serverRoot();
   port();
   maxUploadBytes();

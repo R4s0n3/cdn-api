@@ -2,12 +2,12 @@ import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import fs from 'node:fs';
 import { promises as fsPromises } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { v7 as uuidV7 } from 'uuid';
 
 import { getConfig } from '../config';
 import HttpError from '../models/http-error';
+import { getUploadTempDirectory } from './upload-staging';
+export { getUploadTempDirectory } from './upload-staging';
 
 export const uploadLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -25,11 +25,9 @@ export const strictUploadLimit = rateLimit({
   legacyHeaders: false,
 });
 
-const uploadTempDir =
-  process.env.UPLOAD_TEMP_DIR || path.join(os.tmpdir(), 'cdn-api-uploads');
-
 const storage = multer.diskStorage({
   destination: (_req, _file, callback) => {
+    const uploadTempDir = getUploadTempDirectory();
     fs.mkdir(uploadTempDir, { recursive: true }, (error) => {
       callback(error, uploadTempDir);
     });
@@ -72,7 +70,10 @@ export const upload = multer({
   fileFilter,
 });
 
-export async function validateFileContents(file: Express.Multer.File): Promise<void> {
+/** Verify JPEG, PNG, or PDF signatures before sending staged content to S3. */
+export async function validateFileContents(
+  file: Express.Multer.File,
+): Promise<void> {
   const handle = await fsPromises.open(file.path, 'r');
   const header = Buffer.alloc(8);
 
@@ -87,7 +88,9 @@ export async function validateFileContents(file: Express.Multer.File): Promise<v
         bytes[2] === 0xff) ||
       (file.mimetype === 'image/png' &&
         bytes.length >= 8 &&
-        bytes.equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) ||
+        bytes.equals(
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        )) ||
       (file.mimetype === 'application/pdf' &&
         bytes.length >= 5 &&
         bytes.subarray(0, 5).toString('ascii') === '%PDF-');
@@ -100,8 +103,13 @@ export async function validateFileContents(file: Express.Multer.File): Promise<v
   }
 }
 
-export async function removeTempFiles(files: Express.Multer.File[]): Promise<void> {
-  const results = await Promise.allSettled(files.map((file) => fsPromises.unlink(file.path)));
+/** Attempt cleanup of every staged file and report failures other than already missing files. */
+export async function removeTempFiles(
+  files: Express.Multer.File[],
+): Promise<void> {
+  const results = await Promise.allSettled(
+    files.map((file) => fsPromises.unlink(file.path)),
+  );
   const failures = results.filter(
     (result): result is PromiseRejectedResult =>
       result.status === 'rejected' &&
@@ -116,6 +124,7 @@ export async function removeTempFiles(files: Express.Multer.File[]): Promise<voi
   }
 }
 
+/** Preserve the legacy salted cluster algorithm used in existing object paths. */
 export function getHashedCluster(
   str1: string,
   str2: string,

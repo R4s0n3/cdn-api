@@ -2,7 +2,7 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
-import { type AppConfig, isAllowedOrigin } from './config';
+import { type AppConfig, isAllowedOrigin, parseTrustProxy } from './config';
 import { ensureStorageLayout } from './util/paths';
 import uploadRoutes from './routes/upload-routes';
 import storageRoutes from './routes/storage-routes';
@@ -24,12 +24,13 @@ const apiLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+/** Build the CDN with disk storage by default and optional S3 routes and integration guide. */
 export function createApp(config?: AppConfig) {
   if (!config || process.env.SERVER_ROOT) ensureStorageLayout();
 
   const app = express();
   app.disable('x-powered-by');
-  app.set('trust proxy', 1);
+  app.set('trust proxy', parseTrustProxy());
 
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -50,6 +51,13 @@ export function createApp(config?: AppConfig) {
     app.get('/api/install', redirectToInstallGuide);
     app.head(INSTALL_GUIDE_PATH, guide);
     app.get(INSTALL_GUIDE_PATH, guide);
+    const downloads = rateLimit({
+      windowMs: 60000,
+      max: 300,
+      standardHeaders: true,
+      legacyHeaders: false,
+    });
+    app.use('/storage/:cluster/:fileName', downloads);
     app.use('/storage', storageRoutes);
   }
 

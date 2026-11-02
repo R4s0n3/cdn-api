@@ -163,3 +163,27 @@ to PostgreSQL separately; this branch does not migrate a legacy database in plac
 
 Run `npm run check` for the build, TypeScript checks, S3/media unit tests, and the
 upstream HTTP compatibility tests.
+
+
+## Proxy, readiness, and S3 failure handling
+
+`TRUST_PROXY` defaults to `0`, so client-supplied forwarding headers are ignored.
+For Coolify behind one reverse proxy, set `TRUST_PROXY=1` and expose the service
+only through that proxy: do not publish port 9001 directly to the internet.
+Use the exact verified hop count if your deployment has more proxies; `true` is
+not accepted. This deployment setting controls client IPs used for rate limits.
+S3 proxy downloads are limited to 300 requests per minute per client IP.
+
+S3 readiness now checks the staging directory with a real temporary write. At
+most one database probe remains in flight even after a readiness response times
+out. On startup, UUID-named staged files older than 24 hours are removed; recent
+uploads, unrelated files, and symlinks are preserved.
+
+Transient S3 PUT failures retry up to `S3_MAX_ATTEMPTS`, reopening the file stream
+for each attempt. Upload rollback deletion gets three bounded attempts. Exhausted
+rollback failures and uncertain metadata commits still log object keys with
+`Storage reconciliation required`: operators must reconcile those keys against
+PostgreSQL before deleting them. There is no durable background reconciliation queue.
+The reference client rejects cleartext remote HTTP origins; loopback development
+origins remain supported. Conditional S3 requests use ETags/dates to avoid downloading
+unchanged files, and an ambiguous HEAD 404 checks bucket health before returning 404.

@@ -28,7 +28,8 @@ vi.mock('../storage/s3-storage', () => ({
   isRangeNotSatisfiable: (error: {
     name?: string;
     $metadata?: { httpStatusCode?: number };
-  }) => error?.name === 'InvalidRange' || error?.$metadata?.httpStatusCode === 416,
+  }) =>
+    error?.name === 'InvalidRange' || error?.$metadata?.httpStatusCode === 416,
 }));
 
 import {
@@ -95,11 +96,7 @@ describe('storage controllers', () => {
     const response = new TestResponse();
     const next = vi.fn();
 
-    await getStoredFile(
-      createRequest() as never,
-      response as never,
-      next,
-    );
+    await getStoredFile(createRequest() as never, response as never, next);
 
     expect(mocks.getObject).toHaveBeenCalledWith(
       'production/0000009mcbxv/legacy-file.pdf',
@@ -148,11 +145,7 @@ describe('storage controllers', () => {
     const response = new TestResponse();
     const next = vi.fn();
 
-    await headStoredFile(
-      createRequest() as never,
-      response as never,
-      next,
-    );
+    await headStoredFile(createRequest() as never, response as never, next);
 
     expect(mocks.headObject).toHaveBeenCalledWith(
       'production/0000009mcbxv/legacy-file.pdf',
@@ -162,6 +155,43 @@ describe('storage controllers', () => {
     expect(response.statusCode).toBe(200);
     expect(response.body).toHaveLength(0);
     expect(response.headers.get('content-length')).toBe('11');
+  });
+
+  it('returns 304 without downloading a body when an ETag matches', async () => {
+    mocks.headObject.mockResolvedValue({
+      ETag: '"unchanged"',
+      ContentLength: 5000,
+    });
+    const request = createRequest();
+    request.header.mockImplementation((name) =>
+      name === 'If-None-Match' ? 'W/"unchanged"' : undefined,
+    );
+    const response = new TestResponse();
+    const next = vi.fn();
+    await getStoredFile(request as never, response as never, next);
+    expect(response.statusCode).toBe(304);
+    expect(mocks.getObject).not.toHaveBeenCalled();
+    expect(response.headers.has('content-length')).toBe(false);
+    expect(next).not.toHaveBeenCalled();
+  });
+  it('honors If-None-Match precedence over If-Modified-Since', async () => {
+    mocks.headObject.mockResolvedValue({
+      ETag: '"new"',
+      LastModified: new Date('2026-01-01'),
+    });
+    mocks.getObject.mockResolvedValue({ Body: Readable.from(['body']) });
+    const request = createRequest();
+    request.header.mockImplementation((name) =>
+      name === 'If-None-Match'
+        ? '"old"'
+        : name === 'If-Modified-Since'
+          ? 'Wed, 01 Jan 2030 00:00:00 GMT'
+          : undefined,
+    );
+    const response = new TestResponse();
+    await getStoredFile(request as never, response as never, vi.fn());
+    expect(response.statusCode).toBe(200);
+    expect(mocks.getObject).toHaveBeenCalled();
   });
 
   it('preserves S3 InvalidRange as HTTP 416', async () => {

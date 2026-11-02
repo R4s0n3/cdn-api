@@ -8,6 +8,7 @@ import HttpError from '../models/http-error';
 import { buildObjectKey, getObjectStorage } from '../storage/s3-storage';
 import { resolveAssetFile, resolveStorageFile } from '../util/paths';
 
+/** List active records in the dedicated CDN database with bounded search and pagination. */
 export async function listMedia(
   req: Request,
   res: Response,
@@ -52,6 +53,7 @@ export async function listMedia(
   }
 }
 
+/** Delete a managed disk or S3 file before marking its metadata deleted; preserve failures for retry. */
 export async function deleteMedia(
   req: Request,
   res: Response,

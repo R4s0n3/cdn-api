@@ -23,6 +23,7 @@ type FileRecordInput = {
   url: string;
 };
 
+/** Require the deployment key identity installed by the authentication middleware. */
 function getAuth(request: Request): NonNullable<Request['auth']> {
   if (!request.auth) {
     throw new HttpError('Invalid API-KEY', 403);
@@ -31,22 +32,32 @@ function getAuth(request: Request): NonNullable<Request['auth']> {
   return request.auth;
 }
 
+/** Retry compensating object deletion three times, then log keys for operator reconciliation. */
 async function rollbackObjects(objectKeys: string[]): Promise<void> {
   if (objectKeys.length === 0) {
     return;
   }
 
-  try {
-    await getObjectStorage().deleteObjects(objectKeys);
-  } catch (error) {
-    console.error('Storage reconciliation required', {
-      error,
-      objectKeys: [...objectKeys],
-      reason: 'Failed to delete objects during upload rollback',
-    });
+  let failure: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await getObjectStorage().deleteObjects(objectKeys);
+      return;
+    } catch (error) {
+      failure = error;
+    }
+    if (attempt < 2)
+      await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
   }
+  console.error('Storage reconciliation required', {
+    error: failure,
+    objectKeys: [...objectKeys],
+    reason:
+      'Failed to delete objects during upload rollback after three attempts',
+  });
 }
 
+/** Remove staged upload files without masking the primary upload response. */
 async function cleanupTempFiles(files: Express.Multer.File[]): Promise<void> {
   try {
     await removeTempFiles(files);
@@ -55,6 +66,7 @@ async function cleanupTempFiles(files: Express.Multer.File[]): Promise<void> {
   }
 }
 
+/** Keep objects when a database commit is ambiguous and log their keys for investigation. */
 function retainObjectsForReconciliation(
   objectKeys: string[],
   reason: string,
@@ -68,6 +80,7 @@ function retainObjectsForReconciliation(
   objectKeys.length = 0;
 }
 
+/** Preserve expected HTTP failures while hiding storage driver details from clients. */
 function mapUploadError(error: unknown): HttpError {
   if (error instanceof HttpError) {
     return error;
@@ -77,6 +90,7 @@ function mapUploadError(error: unknown): HttpError {
   return new HttpError('Object storage is temporarily unavailable', 502);
 }
 
+/** Build PostgreSQL metadata and the matching S3 key for a validated upload. */
 function toFileRecord(
   file: Express.Multer.File,
   apiKey: string,
@@ -100,6 +114,7 @@ const uploadControllers = {
     res.status(200).send('online');
   },
 
+  /** Validate and publish one S3 upload, recovering ambiguous metadata commits before rollback. */
   uploadFile: async (
     req: Request,
     res: Response,
@@ -189,6 +204,7 @@ const uploadControllers = {
     }
   },
 
+  /** Publish a batch and atomically save metadata, retaining uncertain commits for reconciliation. */
   bulkUpload: async (
     req: Request,
     res: Response,
