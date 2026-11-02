@@ -1,3 +1,4 @@
+import { isZipMimeType } from '../util/zip-files';
 import { type NextFunction, type Request, type Response } from 'express';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
@@ -76,6 +77,8 @@ function applyObjectHeaders(
 
   if (object.ContentType) {
     response.setHeader('Content-Type', object.ContentType);
+    if (isZipMimeType(object.ContentType))
+      response.setHeader('Content-Disposition', 'attachment');
   }
   if (object.ContentLength !== undefined) {
     response.setHeader('Content-Length', object.ContentLength.toString());

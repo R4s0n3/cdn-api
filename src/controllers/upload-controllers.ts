@@ -1,3 +1,4 @@
+import { validateZipFile } from '../util/zip-files';
 import type { NextFunction, Request, Response } from 'express';
 import fs from 'fs/promises';
 import path from 'path';
@@ -9,19 +10,28 @@ import { resolveAssetTarget } from '../util/paths';
 
 async function removeFiles(files: Array<{ path: string }> | undefined) {
   if (!files) return;
-  await Promise.all(files.map(async (file) => {
-    try {
-      await fs.unlink(file.path);
-    } catch {
-      console.error('failed to delete upload', { path: file.path });
-    }
-  }));
+  await Promise.all(
+    files.map(async (file) => {
+      try {
+        await fs.unlink(file.path);
+      } catch {
+        console.error('failed to delete upload', { path: file.path });
+      }
+    }),
+  );
 }
 
-async function publishAsset(tmpPath: string, absolute: string, beforePublish: () => Promise<void>) {
+async function publishAsset(
+  tmpPath: string,
+  absolute: string,
+  beforePublish: () => Promise<void>,
+) {
   const dir = path.dirname(absolute);
   await fs.mkdir(dir, { recursive: true });
-  const incoming = path.join(dir, `.${path.basename(absolute)}.${process.pid}.${Date.now()}.incoming`);
+  const incoming = path.join(
+    dir,
+    `.${path.basename(absolute)}.${process.pid}.${Date.now()}.incoming`,
+  );
   try {
     await fs.copyFile(tmpPath, incoming);
     await beforePublish();
@@ -35,8 +45,10 @@ async function publishAsset(tmpPath: string, absolute: string, beforePublish: ()
 }
 
 function assetPathFromRequest(req: Request): string {
-  if (typeof req.body?.path === 'string' && req.body.path.trim()) return req.body.path;
-  if (typeof req.query.path === 'string' && req.query.path.trim()) return req.query.path;
+  if (typeof req.body?.path === 'string' && req.body.path.trim())
+    return req.body.path;
+  if (typeof req.query.path === 'string' && req.query.path.trim())
+    return req.query.path;
   return '';
 }
 
@@ -51,10 +63,10 @@ function storedFile(file: Express.Multer.File) {
 }
 
 const uploadControllers = {
-  getHealth: ((_req: Request, res: Response) => {
+  getHealth: (_req: Request, res: Response) => {
     res.status(200).send('online');
-  }),
-  uploadFile: (async (req: Request, res: Response, next: NextFunction) => {
+  },
+  uploadFile: async (req: Request, res: Response, next: NextFunction) => {
     if (!req.file) {
       next(new HttpError('No file uploaded', 400));
       return;
@@ -62,27 +74,35 @@ const uploadControllers = {
 
     const record = storedFile(req.file);
     try {
+      await validateZipFile(req.file);
       const createdFile = await db.file.create({
         data: record,
       });
       res.status(200).json({
         message: 'File uploaded successfully',
-        files: [{
-          id: createdFile.id,
-          filename: req.file.filename,
-          originalName: req.file.originalname,
-          size: req.file.size,
-          mimetype: req.file.mimetype,
-          url: record.url,
-        }],
+        files: [
+          {
+            id: createdFile.id,
+            filename: req.file.filename,
+            originalName: req.file.originalname,
+            size: req.file.size,
+            mimetype: req.file.mimetype,
+            url: record.url,
+          },
+        ],
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof HttpError) {
+        await removeFiles([req.file]);
+        next(error);
+        return;
+      }
       console.error('upload metadata write failed');
       await removeFiles([req.file]);
       next(new HttpError('Failed to save files to database', 500));
     }
-  }),
-  bulkUpload: (async (req: Request, res: Response, next: NextFunction) => {
+  },
+  bulkUpload: async (req: Request, res: Response, next: NextFunction) => {
     const uploaded = req.files as Express.Multer.File[] | undefined;
     if (!uploaded || uploaded.length === 0) {
       next(new HttpError('No files uploaded', 400));
@@ -91,6 +111,7 @@ const uploadControllers = {
 
     const files = uploaded.map(storedFile);
     try {
+      for (const file of uploaded) await validateZipFile(file);
       await db.$transaction(async (prisma) => {
         await prisma.file.createMany({
           data: files,
@@ -106,13 +127,18 @@ const uploadControllers = {
           url,
         })),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof HttpError) {
+        await removeFiles(uploaded);
+        next(error);
+        return;
+      }
       console.error('bulk upload metadata write failed');
       await removeFiles(uploaded);
       next(new HttpError('Failed to save files to database', 500));
     }
-  }),
-  uploadAsset: (async (req: Request, res: Response, next: NextFunction) => {
+  },
+  uploadAsset: async (req: Request, res: Response, next: NextFunction) => {
     if (!req.file) {
       next(new HttpError('No file uploaded', 400));
       return;
@@ -120,6 +146,7 @@ const uploadControllers = {
 
     const uploaded = req.file;
     try {
+      await validateZipFile(uploaded);
       const target = resolveAssetTarget(assetPathFromRequest(req));
       const extension = path.extname(target.relative);
       if (!mimeMatchesExtension(uploaded.mimetype, extension)) {
@@ -159,14 +186,16 @@ const uploadControllers = {
 
       res.status(200).json({
         message: 'File uploaded successfully',
-        files: [{
-          id: savedId,
-          filename: path.basename(target.relative),
-          originalName: uploaded.originalname,
-          size: uploaded.size,
-          mimetype: uploaded.mimetype,
-          url: target.url,
-        }],
+        files: [
+          {
+            id: savedId,
+            filename: path.basename(target.relative),
+            originalName: uploaded.originalname,
+            size: uploaded.size,
+            mimetype: uploaded.mimetype,
+            url: target.url,
+          },
+        ],
       });
     } catch (error) {
       await removeFiles([uploaded]);
@@ -174,14 +203,17 @@ const uploadControllers = {
         next(error);
         return;
       }
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
         next(new HttpError('An asset with this path already exists.', 409));
         return;
       }
       console.error('asset upload failed');
       next(new HttpError('Failed to save files to database', 500));
     }
-  }),
+  },
 };
 
 export default uploadControllers;

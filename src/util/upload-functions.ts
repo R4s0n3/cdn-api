@@ -1,3 +1,4 @@
+import { isZipMimeType, validateZipFile } from './zip-files';
 import rateLimit from 'express-rate-limit';
 import multer from 'multer';
 import fs from 'node:fs';
@@ -37,6 +38,8 @@ const storage = multer.diskStorage({
       'image/jpeg': 'jpg',
       'image/png': 'png',
       'application/pdf': 'pdf',
+      'application/zip': 'zip',
+      'application/x-zip-compressed': 'zip',
     };
     const extension = mimeToExtension[file.mimetype];
 
@@ -49,12 +52,20 @@ const fileFilter = (
   file: Express.Multer.File,
   callback: multer.FileFilterCallback,
 ) => {
-  const allowedTypes = ['image/jpeg', 'image/png', 'application/pdf'];
+  const allowedTypes = [
+    'image/jpeg',
+    'image/png',
+    'application/pdf',
+    'application/zip',
+    'application/x-zip-compressed',
+  ];
 
   if (allowedTypes.includes(file.mimetype)) {
     callback(null, true);
   } else {
-    callback(new HttpError('Only JPEG, PNG, and PDF files are allowed', 415));
+    callback(
+      new HttpError('Only JPEG, PNG, PDF, and ZIP files are allowed', 415),
+    );
   }
 };
 
@@ -70,10 +81,11 @@ export const upload = multer({
   fileFilter,
 });
 
-/** Verify JPEG, PNG, or PDF signatures before sending staged content to S3. */
+/** Verify JPEG, PNG, PDF, or ZIP signatures before sending staged content to S3. */
 export async function validateFileContents(
   file: Express.Multer.File,
 ): Promise<void> {
+  if (isZipMimeType(file.mimetype)) return validateZipFile(file);
   const handle = await fsPromises.open(file.path, 'r');
   const header = Buffer.alloc(8);
 

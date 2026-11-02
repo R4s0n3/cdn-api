@@ -131,6 +131,8 @@ const ALLOWED_MEDIA_TYPES = new Set([
   'image/jpeg',
   'image/png',
   'application/pdf',
+  'application/zip',
+  'application/x-zip-compressed',
 ]);
 
 export class CdnApiError extends Error {

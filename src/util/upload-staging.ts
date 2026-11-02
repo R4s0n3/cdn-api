@@ -33,7 +33,7 @@ export async function sweepStaleUploads(now = Date.now()): Promise<void> {
   for (const entry of names) {
     if (
       !entry.isFile() ||
-      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(jpg|png|pdf|gif|webp|avif|svg)$/i.test(
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\.(jpg|png|pdf|gif|webp|avif|svg|zip)$/i.test(
         entry.name,
       )
     )

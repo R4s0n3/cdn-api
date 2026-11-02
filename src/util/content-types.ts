@@ -1,7 +1,8 @@
 import path from 'path';
 
 export const STORAGE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
-export const ASSET_CACHE_CONTROL = 'public, max-age=86400, stale-while-revalidate=604800';
+export const ASSET_CACHE_CONTROL =
+  'public, max-age=86400, stale-while-revalidate=604800';
 
 const INLINE_TYPES: Record<string, string> = {
   '.jpg': 'image/jpeg',
@@ -34,6 +35,8 @@ export const MIME_TO_EXTENSION: Record<string, string> = {
   'image/avif': 'avif',
   'image/svg+xml': 'svg',
   'application/pdf': 'pdf',
+  'application/zip': 'zip',
+  'application/x-zip-compressed': 'zip',
 };
 
 export function extensionForMime(mime: string): string | undefined {
@@ -46,7 +49,10 @@ export function mimeMatchesExtension(mime: string, extension: string): boolean {
   return MIME_TO_EXTENSION[mime] === ext;
 }
 
-export function publicFileHeaders(filePath: string, cacheControl: string): Record<string, string> {
+export function publicFileHeaders(
+  filePath: string,
+  cacheControl: string,
+): Record<string, string> {
   const ext = path.extname(filePath).toLowerCase();
   const headers: Record<string, string> = {
     'Cache-Control': cacheControl,
@@ -55,9 +61,16 @@ export function publicFileHeaders(filePath: string, cacheControl: string): Recor
     'Content-Disposition': 'inline',
   };
 
+  if (ext === '.zip') {
+    headers['Content-Type'] = 'application/zip';
+    headers['Content-Disposition'] = 'attachment';
+    return headers;
+  }
+
   if (ext === '.svg') {
     headers['Content-Type'] = 'image/svg+xml';
-    headers['Content-Security-Policy'] = "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'none'";
+    headers['Content-Security-Policy'] =
+      "default-src 'none'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'none'";
     return headers;
   }
 

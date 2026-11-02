@@ -39,7 +39,7 @@ Copy `.env.example` to `.env` for local runs. Prisma reads `.env` during `npm ru
 
 Browser calls from miomideal.com (and its subdomains) may read responses. Other sites can still embed images. Localhost is allowed only when `NODE_ENV` is not `production`.
 
-Upload bodies must be JPEG, PNG, GIF, WebP, AVIF, SVG, or PDF. JPEG uploads are stored as `.jpg`. SVG is served with a locked-down content security policy. HTML placed on the volume by hand is downloaded as `application/octet-stream`. `/api/upload/single` allows 100 requests per 15 minutes, `/api/upload/bulk` allows 100 requests per hour, and the whole `/api` tree allows 100 requests per 90 seconds. File downloads are outside that API limit.
+Upload bodies must be JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, or ZIP. JPEG uploads are stored as `.jpg`. SVG is served with a locked-down content security policy. HTML placed on the volume by hand is downloaded as `application/octet-stream`. `/api/upload/single` allows 100 requests per 15 minutes, `/api/upload/bulk` allows 100 requests per hour, and the whole `/api` tree allows 100 requests per 90 seconds. File downloads are outside that API limit.
 
 ## Volume
 
@@ -135,7 +135,7 @@ no shared application database or database-owned API key model is required.
   Previously cached copies may remain available until they expire.
 
 The library lists database records, not unrelated files copied directly into storage.
-The panel currently accepts JPEG, PNG, and PDF, up to 50 MB each. Hosting/proxy body
+The panel currently accepts JPEG, PNG, PDF, and ZIP, up to 50 MB each. Hosting/proxy body
 limits must also permit the desired size.
 
 ## Optional S3 storage

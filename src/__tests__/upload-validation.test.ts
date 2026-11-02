@@ -32,9 +32,9 @@ async function createUploadedFile(
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      fs.rm(directory, { force: true, recursive: true }),
-    ),
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => fs.rm(directory, { force: true, recursive: true })),
   );
 });
 
@@ -46,6 +46,25 @@ describe('validateFileContents', () => {
     );
 
     await expect(validateFileContents(file)).resolves.toBeUndefined();
+  });
+
+  it.each(['application/zip', 'application/x-zip-compressed'])(
+    'accepts an empty ZIP archive with MIME %s',
+    async (mimetype) => {
+      const bytes = Buffer.alloc(22);
+      bytes.writeUInt32LE(0x06054b50);
+      const file = await createUploadedFile(bytes, mimetype);
+      await expect(validateFileContents(file)).resolves.toBeUndefined();
+    },
+  );
+  it('rejects a renamed non-ZIP payload', async () => {
+    const file = await createUploadedFile(
+      Buffer.from('not a ZIP archive'),
+      'application/zip',
+    );
+    await expect(validateFileContents(file)).rejects.toMatchObject({
+      code: 415,
+    });
   });
 
   it('rejects a payload whose bytes do not match the declared type', async () => {

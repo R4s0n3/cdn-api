@@ -1,3 +1,4 @@
+import { isZipMimeType } from '../util/zip-files';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
@@ -75,6 +76,9 @@ export class S3Storage {
             Body: body,
             ContentLength: file.size,
             ContentType: file.mimetype,
+            ContentDisposition: isZipMimeType(file.mimetype)
+              ? 'attachment'
+              : undefined,
             CacheControl: this.config.cacheControl,
           }),
         );

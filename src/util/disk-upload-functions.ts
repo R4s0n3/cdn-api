@@ -29,13 +29,13 @@ function fileFilter(_req: Express.Request, file: Express.Multer.File, cb: multer
     cb(null, true);
     return;
   }
-  cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, and PDF files are allowed.'));
+  cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.'));
 }
 
 function uploadFileName(file: Express.Multer.File): string {
   const ext = extensionForMime(file.mimetype);
   if (!ext) {
-    throw new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, and PDF files are allowed.');
+    throw new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.');
   }
   return `${uuidV7()}.${ext}`;
 }
@@ -87,7 +87,7 @@ export const assetUpload = multer({
       try {
         const ext = extensionForMime(file.mimetype);
         if (!ext) {
-          cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, and PDF files are allowed.'), '');
+          cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.'), '');
           return;
         }
         cb(null, `${uuidV7()}.${ext}`);

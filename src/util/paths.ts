@@ -80,6 +80,7 @@ function mimeForAssetExtension(extension: string): string {
   if (ext === 'avif') return 'image/avif';
   if (ext === 'svg') return 'image/svg+xml';
   if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'zip') return 'application/zip';
   return '';
 }
 
