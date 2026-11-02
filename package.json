@@ -2,31 +2,36 @@
   "name": "upload",
   "version": "1.0.0",
   "type": "commonjs",
-  "description": "Upload API and public file CDN for cdn.miomideal.com",
   "scripts": {
-    "prebuild": "DATABASE_URL=${DATABASE_URL:-postgresql://build:build@127.0.0.1:5432/cdn} prisma generate",
-    "build": "tsc",
+    "build": "prisma generate && tsc",
+    "check": "npm run build && npm run typecheck && npm test",
     "start": "prisma migrate deploy && node dist/main.js",
-    "dev": "ts-node-dev --respawn src/main.ts",
-    "test": "npm run build && node --test test/*.cjs"
+    "dev": "tsx watch src/main.ts",
+    "test": "vitest run src && node --test test/*.cjs",
+    "test:watch": "vitest src",
+    "typecheck": "tsc -p tsconfig.test.json"
+  },
+  "engines": {
+    "node": ">=20.19"
   },
   "devDependencies": {
-    "@types/bun": "latest",
     "@types/cors": "^2.8.18",
     "@types/express": "^5.0.1",
-    "@types/multer": "^1.4.12",
-    "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "@types/multer": "^2.2.0",
+    "tsx": "^4.23.1",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1095.0",
     "@prisma/client": "^6.8.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.0",
-    "multer": "^1.4.5-lts.2",
-    "prisma": "^6.8.0",
+    "multer": "^2.2.0",
     "uuid": "^11.1.0",
-    "zod": "^3.24.4"
+    "zod": "^3.24.4",
+    "prisma": "^6.8.0"
   }
 }

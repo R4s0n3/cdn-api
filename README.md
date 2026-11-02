@@ -117,3 +117,73 @@ npm test
 ```
 
 To boot against a real database, put its URL in `.env` and run `npm start`.
+
+
+## Panel media library
+
+Deploy with the panel's `feat/media-manager` branch. The panel uses server-only
+`UPLOAD_URL=https://cdn.miomideal.com/api/upload/` and `UPLOAD_KEY`, matching this
+service's `CDN_API_KEY`. The dedicated PostgreSQL database stores only CDN metadata;
+no shared application database or database-owned API key model is required.
+
+- `GET /api/upload/files?search=&page=0` lists active metadata, newest first,
+  in pages of 24. It includes existing uploads and named assets.
+- `DELETE /api/upload/files/:id` deletes the stored file and soft-deletes metadata.
+  It requires the same API key as uploads. Failed storage deletions can be retried.
+- Uploads return public URLs which the panel resolves to absolute permalinks.
+  Deleting files used by products or sponsor placements breaks their links.
+  Previously cached copies may remain available until they expire.
+
+The library lists database records, not unrelated files copied directly into storage.
+The panel currently accepts JPEG, PNG, and PDF, up to 50 MB each. Hosting/proxy body
+limits must also permit the desired size.
+
+## Optional S3 storage
+
+Disk storage under `SERVER_ROOT` remains the default and preserves existing
+`/storage/<filename>` and `/assets/...` URLs. Set `S3_ENDPOINT` and the remaining
+S3 variables in `.env.example` to send new single/bulk uploads to S3 instead.
+PostgreSQL, `CDN_API_KEY`, and the persistent `SERVER_ROOT` volume remain in use.
+Named `/api/upload/asset` uploads continue to use the local asset tree.
+
+S3 uploads use `<S3_KEY_PREFIX>/<cluster>/<filename>`. Without `S3_PUBLIC_BASE_URL`,
+the service proxies `/storage/<cluster>/<filename>` URLs from the private bucket.
+With a public base URL configured, it returns direct object URLs. Keep the bucket,
+key prefix, public base URL, and salt stable so permalinks continue to work.
+For an existing cluster layout, set `S3_CLUSTER_USER_ID` to the original owner's ID
+and preserve `SALT_STRING` and the API key; otherwise new uploads use `cdn` as the
+cluster owner. Existing S3 deletion targets are derived from their stored URL,
+not recomputed from the current key or owner ID.
+
+`GET /health/live` is available in both modes. In S3 mode, `/health/ready` checks
+PostgreSQL and the configured bucket; `/api/install` serves the integration guide.
+The Docker entrypoint applies the PostgreSQL migrations before starting the API.
+Switching from an older MySQL-backed version requires migrating its file metadata
+to PostgreSQL separately; this branch does not migrate a legacy database in place.
+
+Run `npm run check` for the build, TypeScript checks, S3/media unit tests, and the
+upstream HTTP compatibility tests.
+
+
+## Proxy, readiness, and S3 failure handling
+
+`TRUST_PROXY` defaults to `0`, so client-supplied forwarding headers are ignored.
+For Coolify behind one reverse proxy, set `TRUST_PROXY=1` and expose the service
+only through that proxy: do not publish port 9001 directly to the internet.
+Use the exact verified hop count if your deployment has more proxies; `true` is
+not accepted. This deployment setting controls client IPs used for rate limits.
+S3 proxy downloads are limited to 300 requests per minute per client IP.
+
+S3 readiness now checks the staging directory with a real temporary write. At
+most one database probe remains in flight even after a readiness response times
+out. On startup, UUID-named staged files older than 24 hours are removed; recent
+uploads, unrelated files, and symlinks are preserved.
+
+Transient S3 PUT failures retry up to `S3_MAX_ATTEMPTS`, reopening the file stream
+for each attempt. Upload rollback deletion gets three bounded attempts. Exhausted
+rollback failures and uncertain metadata commits still log object keys with
+`Storage reconciliation required`: operators must reconcile those keys against
+PostgreSQL before deleting them. There is no durable background reconciliation queue.
+The reference client rejects cleartext remote HTTP origins; loopback development
+origins remain supported. Conditional S3 requests use ETags/dates to avoid downloading
+unchanged files, and an ambiguous HEAD 404 checks bucket health before returning 404.

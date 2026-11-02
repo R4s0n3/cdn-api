@@ -15,6 +15,10 @@ const validateKey = (req: Request, _res: Response, next: NextFunction) => {
     return;
   }
 
+  req.auth = {
+    apiKey: provided,
+    userId: process.env.S3_CLUSTER_USER_ID || 'cdn',
+  };
   next();
 };
 

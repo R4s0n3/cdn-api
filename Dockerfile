@@ -19,6 +19,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+COPY templates ./templates
 
 RUN npm run build \
   && npm prune --omit=dev \
@@ -41,6 +42,7 @@ RUN apt-get update \
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/templates ./templates
 COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/prisma ./prisma
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
