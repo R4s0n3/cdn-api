@@ -45,7 +45,7 @@ vi.mock('../storage/s3-storage', () => ({
   }),
 }));
 
-import uploadControllers from '../controllers/upload-controllers';
+import uploadControllers from '../controllers/s3-upload-controllers';
 
 const temporaryDirectories: string[] = [];
 
@@ -148,7 +148,7 @@ describe('upload rollback behavior', () => {
     );
   });
 
-  it('removes S3 data when MySQL confirms that metadata did not commit', async () => {
+  it('removes S3 data when PostgreSQL confirms that metadata did not commit', async () => {
     const file = await createUploadedFile('database-failure.jpg');
     mocks.createFile.mockRejectedValue(new Error('database write failed'));
     mocks.findUnique.mockResolvedValue(null);
@@ -167,7 +167,7 @@ describe('upload rollback behavior', () => {
     expect(next.mock.calls[0]?.[0]).toMatchObject({ code: 500 });
   });
 
-  it('retains S3 data when the MySQL commit result cannot be determined', async () => {
+  it('retains S3 data when the PostgreSQL commit result cannot be determined', async () => {
     const file = await createUploadedFile('ambiguous-database.jpg');
     mocks.createFile.mockRejectedValue(new Error('commit response lost'));
     mocks.findUnique.mockRejectedValue(new Error('database still unavailable'));

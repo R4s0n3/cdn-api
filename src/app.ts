@@ -1,120 +1,105 @@
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
-import express, {
-  type NextFunction,
-  type Request,
-  type Response,
-} from 'express';
 import rateLimit from 'express-rate-limit';
-import multer from 'multer';
-
-import { type AppConfig } from './config';
-import {
-  getLiveness,
-  getReadiness,
-} from './controllers/health-controllers';
+import { type AppConfig, isAllowedOrigin } from './config';
+import { ensureStorageLayout } from './util/paths';
+import uploadRoutes from './routes/upload-routes';
+import storageRoutes from './routes/storage-routes';
+import { getLiveness, getReadiness } from './controllers/health-controllers';
 import {
   createInstallGuideHandler,
   INSTALL_GUIDE_PATH,
   loadInstallGuide,
   redirectToInstallGuide,
 } from './install-guide';
-import HttpError from './models/http-error';
-import storageRoutes from './routes/storage-routes';
-import uploadRoutes from './routes/upload-routes';
+import errorHandler from './middleware/error-handler';
+import { assetFiles, storageFiles } from './middleware/public-files';
 
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
+  windowMs: 90 * 1000,
   max: 100,
   message: 'Too many requests, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
 });
 
-function normalizeError(error: unknown): HttpError {
-  if (error instanceof HttpError) {
-    return error;
-  }
+export function createApp(config?: AppConfig) {
+  if (!config || process.env.SERVER_ROOT) ensureStorageLayout();
 
-  if (error instanceof multer.MulterError) {
-    if (error.code === 'LIMIT_FILE_SIZE') {
-      return new HttpError('File exceeds the 50 MB upload limit', 413);
-    }
-
-    return new HttpError(error.message, 400);
-  }
-
-  return new HttpError('An unknown error occurred', 500);
-}
-
-export function createApp(config: AppConfig): express.Express {
   const app = express();
-  const installGuideHandler = createInstallGuideHandler(
-    loadInstallGuide(config.publicApiBaseUrl),
-  );
-
   app.disable('x-powered-by');
-  app.set('trust proxy', config.trustProxy);
+  app.set('trust proxy', 1);
+
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader(
+      'Content-Security-Policy',
+      "frame-ancestors 'self' https://miomideal.com https://*.miomideal.com",
+    );
+    next();
+  });
+
+  app.get('/health/live', getLiveness);
+  if (config) {
+    app.get('/health/ready', getReadiness);
+    const guide = createInstallGuideHandler(
+      loadInstallGuide(config.publicApiBaseUrl),
+    );
+    app.get('/api/install', redirectToInstallGuide);
+    app.head(INSTALL_GUIDE_PATH, guide);
+    app.get(INSTALL_GUIDE_PATH, guide);
+    app.use('/storage', storageRoutes);
+  }
+
+  app.get('/health', (_req: Request, res: Response) => {
+    res.status(200).json({ status: 'ok' });
+  });
+
+  app.get('/', (_req: Request, res: Response) => {
+    res.status(200).send('online');
+  });
 
   app.use(
+    '/api',
     cors({
-      origin: '*',
-      methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'],
+      origin(origin, callback) {
+        if (!origin || isAllowedOrigin(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(null, false);
+      },
+      methods: ['GET', 'HEAD', 'POST', 'DELETE', 'OPTIONS'],
       allowedHeaders: [
         'Origin',
         'X-Requested-With',
         'Content-Type',
         'Accept',
         'Authorization',
-        'Range',
         'X-API-Key',
       ],
-      exposedHeaders: [
-        'Accept-Ranges',
-        'Cache-Control',
-        'Content-Length',
-        'Content-Disposition',
-        'Content-Range',
-        'Content-Type',
-        'ETag',
-        'Last-Modified',
-        'X-Content-Type-Options',
-      ],
+      maxAge: 86400,
     }),
   );
-
-  app.get('/', (_req: Request, res: Response) => {
-    res.send('online');
-  });
-  app.get('/health/live', getLiveness);
-  app.get('/health/ready', getReadiness);
-  app.use('/storage', storageRoutes);
-  app.get('/api/install', redirectToInstallGuide);
-  app.head(INSTALL_GUIDE_PATH, installGuideHandler);
-  app.get(INSTALL_GUIDE_PATH, installGuideHandler);
-
-  app.use(apiLimiter);
-  app.use(express.json({ limit: '1mb' }));
+  app.use('/api', apiLimiter);
+  app.use('/api', express.json({ limit: '1mb' }));
   app.use('/api/upload', uploadRoutes);
 
-  app.use((_req: Request, _res: Response, next: NextFunction) => {
-    next(new HttpError('Could not find this route', 404));
+  if (!config || process.env.SERVER_ROOT) {
+    app.use('/storage', storageFiles);
+    app.use('/assets', assetFiles);
+  }
+
+  app.use('/api', (_req: Request, res: Response) => {
+    res.status(404).json({ message: 'Could not find this route' });
   });
 
-  app.use(
-    (error: unknown, _req: Request, res: Response, next: NextFunction) => {
-      if (res.headersSent) {
-        next(error);
-        return;
-      }
+  app.use((_req: Request, res: Response) => {
+    res.status(404).type('text/plain').send('Not found');
+  });
 
-      const httpError = normalizeError(error);
-      if (httpError.code >= 500) {
-        console.error(httpError);
-      }
-
-      res.status(httpError.code).json({ message: httpError.message });
-    },
-  );
-
+  app.use(errorHandler);
   return app;
 }

@@ -1,43 +1,25 @@
-import { type NextFunction, type Request, type Response } from 'express';
-
-import { db } from '../db';
+import type { NextFunction, Request, Response } from 'express';
 import HttpError from '../models/http-error';
+import { apiKeysMatch } from '../util/api-key';
 
-const validateKey = async (
-  req: Request,
-  _res: Response,
-  next: NextFunction,
-): Promise<void> => {
-  const apiKey = req.header('X-API-Key');
-
-  if (!apiKey) {
-    next(new HttpError('API-KEY missing', 401));
+const validateKey = (req: Request, _res: Response, next: NextFunction) => {
+  const provided = req.header('X-API-Key');
+  if (!provided) {
+    next(new HttpError('API-KEY missing.', 401));
     return;
   }
 
-  try {
-    const existingApiKey = await db.apiKey.findFirst({
-      where: {
-        key: apiKey,
-        deletedAt: null,
-      },
-    });
-
-    if (!existingApiKey) {
-      next(new HttpError('Invalid API-KEY', 403));
-      return;
-    }
-
-    req.auth = {
-      userId: existingApiKey.createdById,
-      apiKey: existingApiKey.key,
-    };
-
-    next();
-  } catch (error) {
-    console.error('Database error while validating API key', error);
-    next(new HttpError('Internal server error; try again later', 500));
+  const expected = process.env.CDN_API_KEY || '';
+  if (!expected || !apiKeysMatch(provided, expected)) {
+    next(new HttpError('Invalid API-KEY.', 403));
+    return;
   }
+
+  req.auth = {
+    apiKey: provided,
+    userId: process.env.S3_CLUSTER_USER_ID || 'cdn',
+  };
+  next();
 };
 
 export default validateKey;

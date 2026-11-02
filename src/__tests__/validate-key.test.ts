@@ -1,59 +1,35 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-const findFirst = vi.hoisted(() => vi.fn());
-
-vi.mock('../db', () => ({
-  db: {
-    apiKey: {
-      findFirst,
-    },
-  },
-}));
-
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import validateKey from '../middleware/validate-key';
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  vi.stubEnv('CDN_API_KEY', 'configured-key');
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe('validateKey', () => {
-  it('rejects soft-deleted API keys at the database query', async () => {
-    findFirst.mockResolvedValue(null);
+  it('rejects missing credentials', () => {
     const next = vi.fn();
-
-    await validateKey(
-      {
-        header: vi.fn().mockReturnValue('revoked-key'),
-      } as never,
-      {} as never,
-      next,
-    );
-
-    expect(findFirst).toHaveBeenCalledWith({
-      where: {
-        deletedAt: null,
-        key: 'revoked-key',
-      },
-    });
-    expect(next.mock.calls[0]?.[0]).toMatchObject({ code: 403 });
+    validateKey({ header: () => undefined } as never, {} as never, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 401 }));
   });
-
-  it('returns a fixed server error without exposing a database failure', async () => {
-    findFirst.mockRejectedValue(new Error('mysql://private-host/schema details'));
+  it('rejects incorrect credentials', () => {
     const next = vi.fn();
-
-    await validateKey(
-      {
-        header: vi.fn().mockReturnValue('api-key'),
-      } as never,
-      {} as never,
-      next,
-    );
-
-    expect(next.mock.calls[0]?.[0]).toMatchObject({
-      code: 500,
-      message: 'Internal server error; try again later',
-    });
+    validateKey({ header: () => 'wrong-key' } as never, {} as never, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 403 }));
+  });
+  it('rejects credentials when the server key is unconfigured', () => {
+    vi.stubEnv('CDN_API_KEY', '');
+    const next = vi.fn();
+    validateKey({ header: () => 'configured-key' } as never, {} as never, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 403 }));
+  });
+  it('authenticates the configured deployment key', () => {
+    const next = vi.fn();
+    const request = { header: () => 'configured-key', auth: undefined };
+    validateKey(request as never, {} as never, next);
+    expect(next).toHaveBeenCalledWith();
+    expect(request.auth).toMatchObject({ apiKey: 'configured-key' });
   });
 });

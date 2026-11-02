@@ -1,286 +1,165 @@
-# CDN API
+# cdn-api
 
-Express/TypeScript upload API backed by MySQL metadata and S3-compatible object
-storage. It is configured for Hetzner Object Storage while remaining compatible
-with other S3 implementations.
+Public file CDN and upload API for [cdn.miomideal.com](https://cdn.miomideal.com). One process stores uploads and serves them. It uses its own PostgreSQL database. Previous media on the old host is not imported.
 
-## What stays compatible
+| Method | Path | Auth | Result |
+| --- | --- | --- | --- |
+| `GET` | `/` | no | `online` |
+| `GET` | `/health` | no | `{ "status": "ok" }` |
+| `GET` | `/api/upload` | no | `online` |
+| `POST` | `/api/upload/single` | `X-API-Key` | one file, form field `file` |
+| `POST` | `/api/upload/bulk` | `X-API-Key` | up to 5 files, form field `files` |
+| `POST` | `/api/upload/asset` | `X-API-Key` | write a chosen `/assets/...` path |
 
-- `POST /api/upload/single` still accepts multipart field `file`.
-- `POST /api/upload/bulk` still accepts up to five multipart fields named `files`.
-- Both endpoints still require `X-API-Key` and return the existing response shape.
-- With `S3_PUBLIC_BASE_URL` unset, returned URLs remain
-  `/storage/<cluster>/<filename>`.
-- Existing objects retain the key layout `<cluster>/<filename>`, so migrated
-  database URLs do not need to change.
+Upload URLs look like `/storage/<uuid>.jpg`. Asset URLs look like `/assets/merch/shirt.png`.
 
-The API now serves `GET` and `HEAD /storage/<cluster>/<filename>` from a private
-bucket. `GET` supports byte ranges and `HEAD` returns object metadata. Uploads are
-staged on temporary disk, streamed to S3, and removed locally. If a metadata write
-fails, the API checks whether MySQL committed it before deciding whether the S3
-object is safe to remove. Ambiguous cases are retained and logged for reconciliation
-because an extra object is safer than a live database row pointing to missing data.
+```text
+https://cdn.miomideal.com/storage/<uuid>.jpg
+https://cdn.miomideal.com/assets/merch/shirt.png
+https://cdn.miomideal.com/assets/apps/logo.png
+```
 
-## Local setup
+`/storage` objects use `Cache-Control: public, max-age=31536000, immutable` because each upload gets a new UUID file name. `/assets` objects use a one-day cache with `stale-while-revalidate`, because those names are overwritten in place. Directory listings are disabled.
 
-Requirements:
+## Environment
 
-- Node.js 20.19 or newer
-- MySQL matching `prisma/schema.prisma`
-- A pre-created S3 bucket and credentials
+Set these on the container. `X-API-Key` must match `CDN_API_KEY`. The comparison uses a fixed-length digest.
+
+| Variable | Value |
+| --- | --- |
+| `DATABASE_URL` | `postgresql://cdn:<password>@<host>:5432/cdn` |
+| `CDN_API_KEY` | Long random secret |
+| `SERVER_ROOT` | `/data` |
+| `PORT` | `9001` |
+| `NODE_ENV` | `production` |
+
+`MAX_UPLOAD_BYTES` defaults to 52428800 (50 MiB), with a hard cap of 209715200. `CORS_ORIGINS` adds extra exact browser origins. `https://miomideal.com` and `https://*.miomideal.com` are always allowed.
+
+Copy `.env.example` to `.env` for local runs. Prisma reads `.env` during `npm run build`.
+
+Browser calls from miomideal.com (and its subdomains) may read responses. Other sites can still embed images. Localhost is allowed only when `NODE_ENV` is not `production`.
+
+Upload bodies must be JPEG, PNG, GIF, WebP, AVIF, SVG, or PDF. JPEG uploads are stored as `.jpg`. SVG is served with a locked-down content security policy. HTML placed on the volume by hand is downloaded as `application/octet-stream`. `/api/upload/single` allows 100 requests per 15 minutes, `/api/upload/bulk` allows 100 requests per hour, and the whole `/api` tree allows 100 requests per 90 seconds. File downloads are outside that API limit.
+
+## Volume
+
+Mount a persistent volume at `/data` and set `SERVER_ROOT=/data`.
+
+```text
+/data/storage/<uuid>.<ext>     uploads, served at /storage/<uuid>.<ext>
+/data/assets/merch/shirt.png   served at /assets/merch/shirt.png
+/data/assets/apps/logo.png     served at /assets/apps/logo.png
+```
+
+Asset names may use letters, numbers, `.`, `_`, and `-`. The process runs as root inside the container so files copied onto the volume stay writable. Run one replica.
 
 ```bash
-npm install
+docker cp ./assets/. <container-id>:/data/assets/
+```
+
+## Start command
+
+Migrations run before the server listens:
+
+```bash
+prisma migrate deploy && node dist/main.js
+```
+
+That is what `npm start` runs. The image entrypoint does the same thing, then executes the Docker command `node dist/main.js`. Leave Coolify's start command as the image default.
+
+## Coolify
+
+Create a PostgreSQL database the app can reach, then create this app with build pack **Dockerfile** and Dockerfile location `/Dockerfile`.
+
+1. **Ports Exposes:** `9001`. Leave port mappings empty.
+2. **Domains:** protocol `HTTPS`, domain `cdn.miomideal.com`, port `9001`. Leave Force HTTPS on. Leave HTTP Basic Auth off so public file URLs stay reachable.
+3. **Environment variables:**
+
+   ```text
+   DATABASE_URL=postgresql://cdn:<password>@<host>:5432/cdn
+   CDN_API_KEY=<long-random-secret>
+   SERVER_ROOT=/data
+   PORT=9001
+   NODE_ENV=production
+   ```
+
+   Mark `DATABASE_URL` and `CDN_API_KEY` as secrets. `PORT` must be `9001` so it matches Ports Exposes.
+
+4. **Persistent Storage:** Add → Volume Mount → destination path `/data`.
+5. **Health check:** method `GET`, scheme `http`, host `127.0.0.1`, port `9001`, path `/health`. The process listens on IPv4, so the host is `127.0.0.1`.
+6. Point DNS for `cdn.miomideal.com` at the Coolify server, then deploy.
+
+On startup the entrypoint creates `/data/assets` and `/data/storage`, applies `prisma/migrations`, then listens on `0.0.0.0:9001`. The first migration creates the `File` table.
+
+## Upload examples
+
+```bash
+curl -sS -X POST https://cdn.miomideal.com/api/upload/single \
+  -H "X-API-Key: $CDN_API_KEY" \
+  -F "file=@photo.jpg"
+
+curl -sS -X POST https://cdn.miomideal.com/api/upload/asset \
+  -H "X-API-Key: $CDN_API_KEY" \
+  -F "path=merch/shirt.png" \
+  -F "file=@shirt.png"
+```
+
+`path` may also be `/assets/merch/shirt.png`. Uploading the same asset path again replaces the file and updates its row. The response `url` is the public path.
+
+## Local build
+
+Requires Node.js 22. `prisma generate` does not connect to PostgreSQL. `npm test` checks serving, cache headers, traversal, and API key checks with the database down.
+
+```bash
 cp .env.example .env
-npm run dev
-```
-
-Useful commands:
-
-```bash
-npm run build
-npm run typecheck
+npm ci
 npm test
-npm run check
-npm start
 ```
 
-The process fails at startup with a readable error if required configuration is
-missing or inconsistent.
+To boot against a real database, put its URL in `.env` and run `npm start`.
 
-## Downloadable integration guide
 
-Coding agents can download a public, secret-free TypeScript integration guide
-from:
+## Panel media library
 
-- `GET /api/install/AGENTS.md` (canonical Markdown response)
-- `GET /api/install` (relative permanent redirect to the canonical route)
+Deploy with the panel's `feat/media-manager` branch. The panel uses server-only
+`UPLOAD_URL=https://cdn.miomideal.com/api/upload/` and `UPLOAD_KEY`, matching this
+service's `CDN_API_KEY`. The dedicated PostgreSQL database stores only CDN metadata;
+no shared application database or database-owned API key model is required.
 
-Set `PUBLIC_API_BASE_URL` to this API's public origin. It must not contain
-credentials, a path, a query, or a fragment, and production requires HTTPS. The
-service uses this configured value when rendering the guide; it never derives a
-public URL from request `Host` or forwarded headers.
+- `GET /api/upload/files?search=&page=0` lists active metadata, newest first,
+  in pages of 24. It includes existing uploads and named assets.
+- `DELETE /api/upload/files/:id` deletes the stored file and soft-deletes metadata.
+  It requires the same API key as uploads. Failed storage deletions can be retried.
+- Uploads return public URLs which the panel resolves to absolute permalinks.
+  Deleting files used by products or sponsor placements breaks their links.
+  Previously cached copies may remain available until they expire.
 
-Review the download before installing it in another repository:
+The library lists database records, not unrelated files copied directly into storage.
+The panel currently accepts JPEG, PNG, and PDF, up to 50 MB each. Hosting/proxy body
+limits must also permit the desired size.
 
-```bash
-mkdir -p .agents
-curl --proto '=https' --tlsv1.2 --fail --show-error --silent \
-  'https://cdn-api.example.com/api/install/AGENTS.md' \
-  --output .agents/cdn-api.md.new
-```
+## Optional S3 storage
 
-After reviewing `.agents/cdn-api.md.new`, move it to
-`.agents/cdn-api.md`. Do not replace a repository's root `AGENTS.md`; that file
-can instead direct agents doing upload, media, or storage work to read
-`.agents/cdn-api.md`.
+Disk storage under `SERVER_ROOT` remains the default and preserves existing
+`/storage/<filename>` and `/assets/...` URLs. Set `S3_ENDPOINT` and the remaining
+S3 variables in `.env.example` to send new single/bulk uploads to S3 instead.
+PostgreSQL, `CDN_API_KEY`, and the persistent `SERVER_ROOT` volume remain in use.
+Named `/api/upload/asset` uploads continue to use the local asset tree.
 
-## Hetzner Object Storage configuration
+S3 uploads use `<S3_KEY_PREFIX>/<cluster>/<filename>`. Without `S3_PUBLIC_BASE_URL`,
+the service proxies `/storage/<cluster>/<filename>` URLs from the private bucket.
+With a public base URL configured, it returns direct object URLs. Keep the bucket,
+key prefix, public base URL, and salt stable so permalinks continue to work.
+For an existing cluster layout, set `S3_CLUSTER_USER_ID` to the original owner's ID
+and preserve `SALT_STRING` and the API key; otherwise new uploads use `cdn` as the
+cluster owner. Existing S3 deletion targets are derived from their stored URL,
+not recomputed from the current key or owner ID.
 
-Create a new, empty bucket dedicated to this API and generate S3 credentials in
-the Hetzner Console. Do not reuse Coolify's backup bucket: the application
-migration and rollback commands assume every object in the bucket belongs to this
-API. Use the service endpoint for the bucket location, without the bucket name:
+`GET /health/live` is available in both modes. In S3 mode, `/health/ready` checks
+PostgreSQL and the configured bucket; `/api/install` serves the integration guide.
+The Docker entrypoint applies the PostgreSQL migrations before starting the API.
+Switching from an older MySQL-backed version requires migrating its file metadata
+to PostgreSQL separately; this branch does not migrate a legacy database in place.
 
-| Location | `S3_REGION` | `S3_ENDPOINT` |
-| --- | --- | --- |
-| Falkenstein | `fsn1` | `https://fsn1.your-objectstorage.com` |
-| Nuremberg | `nbg1` | `https://nbg1.your-objectstorage.com` |
-| Helsinki | `hel1` | `https://hel1.your-objectstorage.com` |
-
-Hetzner uses Signature V4 and virtual-hosted addressing, which the AWS SDK uses
-here. Keep `S3_FORCE_PATH_STYLE=false`. The credential needs these exact policy
-actions:
-
-- `s3:ListBucket` on `arn:aws:s3:::YOUR_BUCKET` (this authorizes `HeadBucket`);
-- `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` on
-  `arn:aws:s3:::YOUR_BUCKET/*` or the configured prefix.
-
-Use a dedicated credential and least-privilege bucket policy where possible.
-Hetzner credentials otherwise have broad access to buckets in their project.
-
-### Private bucket (recommended compatibility mode)
-
-Leave `S3_PUBLIC_BASE_URL` empty. New uploads retain relative `/storage/...` URLs,
-and this API streams private objects from S3. Existing client applications do not
-need a URL-format change.
-
-### Public bucket or CDN
-
-Set `S3_PUBLIC_BASE_URL` to the public bucket or CDN origin, for example:
-
-```env
-S3_PUBLIC_BASE_URL=https://my-bucket.nbg1.your-objectstorage.com
-```
-
-New upload responses then contain direct absolute URLs. Existing relative URLs
-continue to work through the API. This is an intentional API behavior change, so
-leave the setting empty during the initial migration unless all clients can
-accept it. Browser `fetch` access to a direct bucket origin also requires a
-bucket CORS policy. Hetzner does not support a native custom-domain CNAME; put a
-CDN or compatible reverse proxy in front instead.
-
-Hetzner references:
-
-- [Object Storage endpoints and limits](https://docs.hetzner.com/storage/object-storage/overview/)
-- [AWS SDK configuration examples](https://docs.hetzner.com/storage/object-storage/getting-started/using-libraries/)
-- [Supported S3 operations](https://docs.hetzner.com/storage/object-storage/supported-actions/)
-- [Bucket CORS policies](https://docs.hetzner.com/storage/object-storage/howto-protect-objects/cors/)
-
-## Coolify deployment
-
-Use the repository `Dockerfile` build pack and keep both `PORT` and Coolify's
-**Port Exposes** value at `9001`. If you intentionally change the port, update both
-values together. The container runs as a non-root user and does not require a
-persistent application volume after the migration.
-
-Important: Coolify's dashboard S3 Storage connection is used for Coolify and
-database backups. It does **not** inject or mount object storage into this
-application, and its backup bucket should not be reused as `S3_BUCKET`. Add all
-variables from `.env.example` to this application's Environment Variables page.
-
-Set these as runtime variables, not build variables:
-
-```env
-NODE_ENV=production
-HOST=0.0.0.0
-PORT=9001
-TRUST_PROXY=1
-PUBLIC_API_BASE_URL=https://cdn-api.example.com
-DATABASE_URL=...
-SALT_STRING=...
-S3_ENDPOINT=https://nbg1.your-objectstorage.com
-S3_REGION=nbg1
-S3_BUCKET=...
-S3_ACCESS_KEY_ID=...
-S3_SECRET_ACCESS_KEY=...
-S3_FORCE_PATH_STYLE=false
-S3_KEY_PREFIX=
-S3_PUBLIC_BASE_URL=
-```
-
-In Coolify's Normal view, disable **Build Variable** and keep **Runtime Variable**
-enabled for every value above. Lock the access key, secret key, database URL, and
-salt as secrets. Enable **Literal** for any value containing `$` (especially an
-existing salt, secret, or database password) so Coolify does not interpolate it.
-The exact legacy `SALT_STRING` must survive unchanged.
-
-Health endpoints:
-
-- `GET /health/live` checks only the Node process.
-- `GET /health/ready` verifies both MySQL and the configured S3 bucket and is used
-  by the Docker/Coolify healthcheck.
-
-After deployment, `/health/ready` must return HTTP 200 before testing uploads.
-Coolify documents application variables and health checks here:
-
-- [Environment variables](https://coolify.io/docs/knowledge-base/environment-variables)
-- [Health checks](https://coolify.io/docs/knowledge-base/health-checks)
-- [Coolify S3 backup storage](https://coolify.io/docs/knowledge-base/s3/introduction)
-
-## Migrating existing files
-
-The safe cutover depends on preserving two things:
-
-1. Keep the exact current `SALT_STRING`. Changing it changes the cluster assigned
-   to future uploads.
-2. Copy the directory contents into S3 with each existing
-   `<cluster>/<filename>` path unchanged.
-
-The migration source must be the directory that directly contains the 12-character
-cluster directories. If `S3_KEY_PREFIX` is empty, an AWS CLI migration looks like:
-
-```bash
-aws configure --profile hetzner-cdn
-aws configure set s3.addressing_style virtual --profile hetzner-cdn
-
-aws s3 sync /path/to/current/storage/ s3://YOUR_BUCKET/ \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  --region nbg1 \
-  --profile hetzner-cdn \
-  --dryrun
-
-aws s3 sync /path/to/current/storage/ s3://YOUR_BUCKET/ \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  --region nbg1 \
-  --profile hetzner-cdn
-
-aws s3 ls s3://YOUR_BUCKET/ \
-  --recursive \
-  --summarize \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  --region nbg1 \
-  --profile hetzner-cdn
-
-# After the final sync, this should print no planned copies.
-aws s3 sync /path/to/current/storage/ s3://YOUR_BUCKET/ \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  --region nbg1 \
-  --profile hetzner-cdn \
-  --size-only \
-  --dryrun
-```
-
-If `S3_KEY_PREFIX=production`, sync to `s3://YOUR_BUCKET/production/` instead.
-Do not use `--delete` during migration.
-
-Recommended sequence:
-
-1. Run the dry run and initial sync while the old API is still online.
-2. Pause old uploads, run a final sync, and repeat the `--size-only --dryrun`
-   command until it reports no differences.
-3. Compare the local file count and byte total with the `aws s3 ls --summarize`
-   totals, then deploy with the unchanged database and `SALT_STRING`.
-4. While writes remain paused, confirm `/health/ready` and open several old
-   `/storage/...` URLs. Then enable writes and test one new file through each
-   upload endpoint.
-5. Keep the old filesystem intact through a rollback window. Delete it only after
-   object counts/sizes and all consuming applications have been verified.
-
-If rollback is required after new S3-backed writes have started, pause uploads and
-reverse-sync the new objects into the old filesystem **before** starting the old
-image:
-
-```bash
-aws s3 sync s3://YOUR_BUCKET/ /path/to/current/storage/ \
-  --endpoint-url https://nbg1.your-objectstorage.com \
-  --region nbg1 \
-  --profile hetzner-cdn
-```
-
-Use `s3://YOUR_BUCKET/production/` as the source when
-`S3_KEY_PREFIX=production`. Do not add `--delete` in either direction.
-
-No Prisma schema migration is required for this storage cutover.
-
-## Operational notes
-
-- Per-file upload limit is 50 MB; bulk accepts at most five files.
-- Bulk uploads are sent to S3 sequentially to limit memory and connection usage.
-- Temporary disk must accommodate the incoming request (up to roughly 250 MB)
-  even though it is cleared after completion.
-- If `UPLOAD_TEMP_DIR` is customized, it must be an absolute path writable by the
-  non-root `node` user; `/tmp/cdn-api-uploads` is the safe default.
-- Object names are UUID-based and treated as immutable, so long-lived cache
-  headers are safe.
-- This service deliberately keeps the bucket private by default. The obscured
-  cluster prefix is compatibility metadata, not an authorization boundary.
-
-### Panel media management
-
-The panel uses the existing `UPLOAD_URL` (the CDN's `/api/upload/` base URL) and
-`UPLOAD_KEY` on the server. Deploy the CDN and panel changes together.
-
-- `GET /api/upload/files?search=&page=0` returns `{ files, total }`, with 24 files
-  per page, newest first. Only active metadata belonging to the authenticated
-  API key and its owner is included.
-- `DELETE /api/upload/files/:id` permanently deletes that owner's S3 object,
-  then marks its metadata deleted. Storage failures leave metadata available
-  for retry. Cached public copies may persist until their cache lifetime expires.
-- Uploads continue to use `POST /api/upload/single`; JPEG, PNG, and PDF files
-  up to 50 MB are accepted. The panel sends each file separately and displays
-  an individual result and public link.
-
-The library lists files recorded in this CDN database, not unrelated objects
-placed directly in the bucket. Existing URLs are public. Deleting files used
-by products or sponsor placements can break those placements.
+Run `npm run check` for the build, TypeScript checks, S3/media unit tests, and the
+upstream HTTP compatibility tests.

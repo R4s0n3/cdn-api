@@ -1,285 +1,187 @@
-import { type File as FileModel } from '@prisma/client';
-import { type NextFunction, type Request, type Response } from 'express';
-
-import { getConfig } from '../config';
+import type { NextFunction, Request, Response } from 'express';
+import fs from 'fs/promises';
+import path from 'path';
+import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import HttpError from '../models/http-error';
-import {
-  buildObjectKey,
-  buildStorageUrl,
-  getObjectStorage,
-} from '../storage/s3-storage';
-import {
-  getHashedCluster,
-  removeTempFiles,
-  validateFileContents,
-} from '../util/upload-functions';
+import { mimeMatchesExtension } from '../util/content-types';
+import { resolveAssetTarget } from '../util/paths';
 
-type FileRecordInput = {
-  appKey: string;
-  createdById: string;
-  fileName: string;
-  mimeType: string;
-  originalName: string;
-  size: number;
-  url: string;
-};
-
-function getAuth(request: Request): NonNullable<Request['auth']> {
-  if (!request.auth) {
-    throw new HttpError('Invalid API-KEY', 403);
-  }
-
-  return request.auth;
+async function removeFiles(files: Array<{ path: string }> | undefined) {
+  if (!files) return;
+  await Promise.all(files.map(async (file) => {
+    try {
+      await fs.unlink(file.path);
+    } catch {
+      console.error('failed to delete upload', { path: file.path });
+    }
+  }));
 }
 
-async function rollbackObjects(objectKeys: string[]): Promise<void> {
-  if (objectKeys.length === 0) {
-    return;
-  }
-
+async function publishAsset(tmpPath: string, absolute: string, beforePublish: () => Promise<void>) {
+  const dir = path.dirname(absolute);
+  await fs.mkdir(dir, { recursive: true });
+  const incoming = path.join(dir, `.${path.basename(absolute)}.${process.pid}.${Date.now()}.incoming`);
   try {
-    await getObjectStorage().deleteObjects(objectKeys);
+    await fs.copyFile(tmpPath, incoming);
+    await beforePublish();
+    await fs.rename(incoming, absolute);
   } catch (error) {
-    console.error('Storage reconciliation required', {
-      error,
-      objectKeys: [...objectKeys],
-      reason: 'Failed to delete objects during upload rollback',
-    });
+    await fs.unlink(incoming).catch(() => undefined);
+    throw error;
+  } finally {
+    await fs.unlink(tmpPath).catch(() => undefined);
   }
 }
 
-async function cleanupTempFiles(files: Express.Multer.File[]): Promise<void> {
-  try {
-    await removeTempFiles(files);
-  } catch (error) {
-    console.error('Failed to clean up temporary upload files', error);
-  }
+function assetPathFromRequest(req: Request): string {
+  if (typeof req.body?.path === 'string' && req.body.path.trim()) return req.body.path;
+  if (typeof req.query.path === 'string' && req.query.path.trim()) return req.query.path;
+  return '';
 }
 
-function retainObjectsForReconciliation(
-  objectKeys: string[],
-  reason: string,
-  error?: unknown,
-): void {
-  console.error('Storage reconciliation required', {
-    error,
-    objectKeys: [...objectKeys],
-    reason,
-  });
-  objectKeys.length = 0;
-}
-
-function mapUploadError(error: unknown): HttpError {
-  if (error instanceof HttpError) {
-    return error;
-  }
-
-  console.error('Object storage upload failed', error);
-  return new HttpError('Object storage is temporarily unavailable', 502);
-}
-
-function toFileRecord(
-  file: Express.Multer.File,
-  apiKey: string,
-  userId: string,
-  cluster: string,
-): FileRecordInput & { objectKey: string } {
-  const config = getConfig();
-
+function storedFile(file: Express.Multer.File) {
   return {
-    appKey: apiKey,
-    createdById: userId,
-    fileName: file.filename,
-    mimeType: file.mimetype,
-    objectKey: buildObjectKey(cluster, file.filename, config.s3.keyPrefix),
     originalName: file.originalname,
+    fileName: file.filename,
     size: file.size,
-    url: buildStorageUrl(cluster, file.filename, config.s3),
+    mimeType: file.mimetype,
+    url: `/storage/${file.filename}`,
   };
 }
 
 const uploadControllers = {
-  getHealth: (_req: Request, res: Response): void => {
+  getHealth: ((_req: Request, res: Response) => {
     res.status(200).send('online');
-  },
-
-  uploadFile: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const file = req.file;
-
-    if (!file) {
+  }),
+  uploadFile: (async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.file) {
       next(new HttpError('No file uploaded', 400));
       return;
     }
 
-    const uploadedObjectKeys: string[] = [];
-
+    const record = storedFile(req.file);
     try {
-      const { apiKey, userId } = getAuth(req);
-      await validateFileContents(file);
-
-      const cluster = getHashedCluster(apiKey, userId);
-      const { objectKey, ...record } = toFileRecord(file, apiKey, userId, cluster);
-
-      uploadedObjectKeys.push(objectKey);
-      await getObjectStorage().uploadFile(objectKey, file);
-
-      let createdFile: FileModel;
-      try {
-        createdFile = await db.file.create({ data: record });
-      } catch (error) {
-        console.error('Failed to save uploaded file metadata', error);
-
-        try {
-          const committedFile = await db.file.findUnique({
-            where: { fileName: record.fileName },
-          });
-
-          if (committedFile) {
-            createdFile = committedFile;
-            console.warn('Recovered an upload after an ambiguous database response', {
-              fileName: record.fileName,
-            });
-          } else {
-            await rollbackObjects(uploadedObjectKeys);
-            uploadedObjectKeys.length = 0;
-            throw new HttpError('Failed to save file metadata', 500);
-          }
-        } catch (verificationError) {
-          if (verificationError instanceof HttpError) {
-            throw verificationError;
-          }
-
-          retainObjectsForReconciliation(
-            uploadedObjectKeys,
-            'Could not determine whether single-file metadata committed',
-            verificationError,
-          );
-          throw new HttpError('Failed to confirm file metadata', 500);
-        }
-      }
-      uploadedObjectKeys.length = 0;
-
+      const createdFile = await db.file.create({
+        data: record,
+      });
       res.status(200).json({
         message: 'File uploaded successfully',
-        files: [
-          {
-            id: createdFile.id,
-            filename: file.filename,
-            originalName: file.originalname,
-            size: file.size,
-            mimetype: file.mimetype,
-            url: record.url,
-          },
-        ],
+        files: [{
+          id: createdFile.id,
+          filename: req.file.filename,
+          originalName: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+          url: record.url,
+        }],
       });
-    } catch (error) {
-      await rollbackObjects(uploadedObjectKeys);
-      next(mapUploadError(error));
-    } finally {
-      await cleanupTempFiles([file]);
+    } catch {
+      console.error('upload metadata write failed');
+      await removeFiles([req.file]);
+      next(new HttpError('Failed to save files to database', 500));
     }
-  },
-
-  bulkUpload: async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const files = (req.files as Express.Multer.File[] | undefined) ?? [];
-
-    if (files.length === 0) {
+  }),
+  bulkUpload: (async (req: Request, res: Response, next: NextFunction) => {
+    const uploaded = req.files as Express.Multer.File[] | undefined;
+    if (!uploaded || uploaded.length === 0) {
       next(new HttpError('No files uploaded', 400));
       return;
     }
 
-    const uploadedObjectKeys: string[] = [];
-
+    const files = uploaded.map(storedFile);
     try {
-      const { apiKey, userId } = getAuth(req);
-      const cluster = getHashedCluster(apiKey, userId);
-
-      for (const file of files) {
-        await validateFileContents(file);
-      }
-
-      const records = files.map((file) => toFileRecord(file, apiKey, userId, cluster));
-
-      for (let index = 0; index < files.length; index += 1) {
-        const file = files[index];
-        const record = records[index];
-
-        if (!file || !record) {
-          throw new HttpError('Invalid bulk upload state', 500);
-        }
-
-        uploadedObjectKeys.push(record.objectKey);
-        await getObjectStorage().uploadFile(record.objectKey, file);
-      }
-
-      try {
-        await db.$transaction(async (prisma) => {
-          await prisma.file.createMany({
-            data: records.map(({ objectKey: _objectKey, ...record }) => record),
-          });
+      await db.$transaction(async (prisma) => {
+        await prisma.file.createMany({
+          data: files,
         });
-      } catch (error) {
-        console.error('Failed to save bulk upload metadata', error);
-
-        try {
-          const committedFiles = await db.file.findMany({
-            where: {
-              fileName: {
-                in: records.map((record) => record.fileName),
-              },
-            },
-            select: { fileName: true },
-          });
-
-          if (committedFiles.length === records.length) {
-            console.warn('Recovered a bulk upload after an ambiguous database response', {
-              fileNames: committedFiles.map((fileRecord) => fileRecord.fileName),
-            });
-          } else if (committedFiles.length === 0) {
-            await rollbackObjects(uploadedObjectKeys);
-            uploadedObjectKeys.length = 0;
-            throw new HttpError('Failed to save file metadata', 500);
-          } else {
-            retainObjectsForReconciliation(
-              uploadedObjectKeys,
-              'Only part of the bulk metadata was visible after a database error',
-              error,
-            );
-            throw new HttpError('Failed to confirm all file metadata', 500);
-          }
-        } catch (verificationError) {
-          if (verificationError instanceof HttpError) {
-            throw verificationError;
-          }
-
-          retainObjectsForReconciliation(
-            uploadedObjectKeys,
-            'Could not determine whether bulk metadata committed',
-            verificationError,
-          );
-          throw new HttpError('Failed to confirm file metadata', 500);
-        }
-      }
-      uploadedObjectKeys.length = 0;
-
+      });
       res.status(200).json({
         message: 'Files uploaded successfully',
-        files: records.map((record) => ({
-          filename: record.fileName,
-          originalName: record.originalName,
-          size: record.size,
-          mimetype: record.mimeType,
-          url: record.url,
+        files: files.map(({ fileName, originalName, size, mimeType, url }) => ({
+          filename: fileName,
+          originalName,
+          size,
+          mimetype: mimeType,
+          url,
         })),
       });
-    } catch (error) {
-      await rollbackObjects(uploadedObjectKeys);
-      next(mapUploadError(error));
-    } finally {
-      await cleanupTempFiles(files);
+    } catch {
+      console.error('bulk upload metadata write failed');
+      await removeFiles(uploaded);
+      next(new HttpError('Failed to save files to database', 500));
     }
-  },
+  }),
+  uploadAsset: (async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.file) {
+      next(new HttpError('No file uploaded', 400));
+      return;
+    }
+
+    const uploaded = req.file;
+    try {
+      const target = resolveAssetTarget(assetPathFromRequest(req));
+      const extension = path.extname(target.relative);
+      if (!mimeMatchesExtension(uploaded.mimetype, extension)) {
+        await removeFiles([uploaded]);
+        next(new HttpError('File type does not match the asset path.', 400));
+        return;
+      }
+
+      let savedId = '';
+      await publishAsset(uploaded.path, target.absolute, async () => {
+        const data = {
+          originalName: uploaded.originalname,
+          fileName: target.relative,
+          size: uploaded.size,
+          mimeType: uploaded.mimetype,
+          url: target.url,
+        };
+        const existing = await db.file.findFirst({
+          where: { url: target.url },
+          select: { id: true },
+        });
+        if (existing) {
+          const updated = await db.file.update({
+            where: { id: existing.id },
+            data: { ...data, deletedAt: null },
+            select: { id: true },
+          });
+          savedId = updated.id;
+          return;
+        }
+        const created = await db.file.create({
+          data,
+          select: { id: true },
+        });
+        savedId = created.id;
+      });
+
+      res.status(200).json({
+        message: 'File uploaded successfully',
+        files: [{
+          id: savedId,
+          filename: path.basename(target.relative),
+          originalName: uploaded.originalname,
+          size: uploaded.size,
+          mimetype: uploaded.mimetype,
+          url: target.url,
+        }],
+      });
+    } catch (error) {
+      await removeFiles([uploaded]);
+      if (error instanceof HttpError) {
+        next(error);
+        return;
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        next(new HttpError('An asset with this path already exists.', 409));
+        return;
+      }
+      console.error('asset upload failed');
+      next(new HttpError('Failed to save files to database', 500));
+    }
+  }),
 };
 
 export default uploadControllers;

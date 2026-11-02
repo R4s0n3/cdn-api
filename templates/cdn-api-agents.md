@@ -42,11 +42,11 @@ environment mechanism:
 
 ```env
 CDN_API_BASE_URL={{PUBLIC_API_BASE_URL}}
-CDN_API_KEY=obtain-a-project-specific-key
+CDN_API_KEY=obtain-the-deployment-key
 ```
 
 - `CDN_API_BASE_URL` is the public CDN API origin.
-- `CDN_API_KEY` is a server-only secret. Obtain one separately revocable key per
+- `CDN_API_KEY` is a server-only secret. Use the configured deployment key for each
   application through the existing media-center dashboard or from the project
   owner.
 - If no project-specific key is available, stop and request one. Never invent a

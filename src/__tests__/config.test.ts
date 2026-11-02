@@ -4,7 +4,7 @@ import { loadConfig } from '../config';
 
 const validEnvironment: NodeJS.ProcessEnv = {
   PUBLIC_API_BASE_URL: 'https://cdn-api.example.com',
-  DATABASE_URL: 'mysql://user:password@database:3306/cdn',
+  DATABASE_URL: 'postgresql://user:password@database:5432/cdn',
   SALT_STRING: 'keep-this-value-during-migration',
   S3_ACCESS_KEY_ID: 'access-key',
   S3_BUCKET: 'cdn-files',

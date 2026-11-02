@@ -28,7 +28,9 @@ function hasOnlyOriginComponents(value: string): boolean {
 
 const envSchema = z
   .object({
-    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    NODE_ENV: z
+      .enum(['development', 'test', 'production'])
+      .default('development'),
     PORT: z.coerce.number().int().min(1).max(65535).default(9001),
     HOST: z.string().min(1).default('0.0.0.0'),
     PUBLIC_API_BASE_URL: urlValue,
@@ -55,7 +57,12 @@ const envSchema = z
       .string()
       .min(1)
       .default('public, max-age=31536000, immutable'),
-    READINESS_TIMEOUT_MS: z.coerce.number().int().min(250).max(30000).default(5000),
+    READINESS_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .min(250)
+      .max(30000)
+      .default(5000),
     UPLOAD_TEMP_DIR: z
       .string()
       .min(1)
@@ -74,7 +81,10 @@ const envSchema = z
       });
     }
 
-    if (env.NODE_ENV === 'production' && publicApiBaseUrl.protocol !== 'https:') {
+    if (
+      env.NODE_ENV === 'production' &&
+      publicApiBaseUrl.protocol !== 'https:'
+    ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['PUBLIC_API_BASE_URL'],
@@ -92,7 +102,8 @@ const envSchema = z
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['PUBLIC_API_BASE_URL'],
-        message: 'must be an origin without credentials, a path, a query, or a fragment',
+        message:
+          'must be an origin without credentials, a path, a query, or a fragment',
       });
     }
 
@@ -122,7 +133,8 @@ const envSchema = z
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['S3_ENDPOINT'],
-        message: 'must be a service origin without credentials, a path, a query, or a fragment',
+        message:
+          'must be a service origin without credentials, a path, a query, or a fragment',
       });
     }
 
@@ -148,7 +160,10 @@ const envSchema = z
         });
       }
 
-      if (env.NODE_ENV === 'production' && publicBaseUrl.protocol !== 'https:') {
+      if (
+        env.NODE_ENV === 'production' &&
+        publicBaseUrl.protocol !== 'https:'
+      ) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['S3_PUBLIC_BASE_URL'],
@@ -218,19 +233,27 @@ function trimTrailingSlashes(value: string): string {
 function normalizeKeyPrefix(value: string): string {
   const prefix = value.trim().replace(/^\/+|\/+$/g, '');
 
-  if (prefix.split('/').some((segment) => segment === '.' || segment === '..')) {
-    throw new Error('Invalid environment configuration: S3_KEY_PREFIX contains a path segment');
+  if (
+    prefix.split('/').some((segment) => segment === '.' || segment === '..')
+  ) {
+    throw new Error(
+      'Invalid environment configuration: S3_KEY_PREFIX contains a path segment',
+    );
   }
 
   return prefix;
 }
 
-export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
+export function loadConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+): AppConfig {
   const result = envSchema.safeParse(environment);
 
   if (!result.success) {
     const details = result.error.issues
-      .map((issue) => `${issue.path.join('.') || 'environment'}: ${issue.message}`)
+      .map(
+        (issue) => `${issue.path.join('.') || 'environment'}: ${issue.message}`,
+      )
       .join('; ');
     throw new Error(`Invalid environment configuration: ${details}`);
   }
@@ -269,4 +292,84 @@ let cachedConfig: AppConfig | undefined;
 export function getConfig(): AppConfig {
   cachedConfig ??= loadConfig();
   return cachedConfig;
+}
+
+import path from 'path';
+
+const DEFAULT_MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+const MAX_UPLOAD_CAP_BYTES = 200 * 1024 * 1024;
+
+export function serverRoot(): string {
+  const root = process.env.SERVER_ROOT;
+  if (!root || !root.trim()) {
+    throw new Error('SERVER_ROOT is not set');
+  }
+  if (!path.isAbsolute(root)) {
+    throw new Error('SERVER_ROOT must be an absolute path');
+  }
+  return path.resolve(root);
+}
+
+export function port(): number {
+  const raw = process.env.PORT || '9001';
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0 || value > 65535) {
+    throw new Error('PORT must be an integer between 1 and 65535');
+  }
+  return value;
+}
+
+export function maxUploadBytes(): number {
+  const raw = process.env.MAX_UPLOAD_BYTES;
+  if (!raw || !raw.trim()) return DEFAULT_MAX_UPLOAD_BYTES;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0 || value > MAX_UPLOAD_CAP_BYTES) {
+    throw new Error(
+      `MAX_UPLOAD_BYTES must be a positive integer up to ${MAX_UPLOAD_CAP_BYTES}`,
+    );
+  }
+  return value;
+}
+
+export function isAllowedOrigin(origin: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  const extras = (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (extras.includes(origin)) return true;
+
+  const host = url.hostname.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1') {
+    return process.env.NODE_ENV !== 'production' && url.protocol === 'http:';
+  }
+
+  if (url.protocol !== 'https:') return false;
+  return host === 'miomideal.com' || host.endsWith('.miomideal.com');
+}
+
+export function assertConfig(): void {
+  const missing: string[] = [];
+  if (!process.env.DATABASE_URL) missing.push('DATABASE_URL');
+  if (!process.env.CDN_API_KEY) missing.push('CDN_API_KEY');
+  if (!process.env.SERVER_ROOT) missing.push('SERVER_ROOT');
+  if (missing.length > 0) {
+    throw new Error(`Missing required environment: ${missing.join(', ')}`);
+  }
+  const databaseUrl = process.env.DATABASE_URL || '';
+  if (
+    !databaseUrl.startsWith('postgresql://') &&
+    !databaseUrl.startsWith('postgres://')
+  ) {
+    throw new Error('DATABASE_URL must start with postgresql://');
+  }
+  serverRoot();
+  port();
+  maxUploadBytes();
 }
