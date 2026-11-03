@@ -24,6 +24,21 @@ export function storageDirectory(): string {
   return dir;
 }
 
+/** Private client files live outside both public serving roots, including in S3 mode. */
+export function privateStorageDirectory(): string {
+  const dir = path.join(serverRoot(), 'private');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  return dir;
+}
+
+export function resolvePrivateFile(filename: string): string | null {
+  if (!isSafeFileName(filename)) return null;
+  return resolveExistingFile(
+    path.join(privateStorageDirectory(), filename),
+    privateStorageDirectory(),
+  );
+}
+
 export interface AssetTarget {
   absolute: string;
   relative: string;
@@ -31,7 +46,11 @@ export interface AssetTarget {
 }
 
 export function resolveAssetTarget(rawPath: string): AssetTarget {
-  if (typeof rawPath !== 'string' || rawPath.length === 0 || rawPath.length > 512) {
+  if (
+    typeof rawPath !== 'string' ||
+    rawPath.length === 0 ||
+    rawPath.length > 512
+  ) {
     throw new HttpError('Asset path is required.', 400);
   }
   if (rawPath.includes('\0') || rawPath.includes('\\')) {
@@ -43,7 +62,11 @@ export function resolveAssetTarget(rawPath: string): AssetTarget {
     normalized = normalized.slice('assets/'.length);
   }
   const parts = normalized.split('/');
-  if (parts.length === 0 || parts.length > 8 || parts.some((part) => part.length === 0)) {
+  if (
+    parts.length === 0 ||
+    parts.length > 8 ||
+    parts.some((part) => part.length === 0)
+  ) {
     throw new HttpError('Invalid asset path.', 400);
   }
   if (!parts.every((part) => isSafeFileName(part))) {
@@ -54,7 +77,10 @@ export function resolveAssetTarget(rawPath: string): AssetTarget {
   }
 
   const extension = path.extname(parts[parts.length - 1]).toLowerCase();
-  if (!extension || !mimeMatchesExtension(mimeForAssetExtension(extension), extension)) {
+  if (
+    !extension ||
+    !mimeMatchesExtension(mimeForAssetExtension(extension), extension)
+  ) {
     throw new HttpError('Invalid file type for asset path.', 400);
   }
 
@@ -84,7 +110,10 @@ function mimeForAssetExtension(extension: string): string {
   return '';
 }
 
-export function resolveExistingFile(candidate: string, jailRoot: string): string | null {
+export function resolveExistingFile(
+  candidate: string,
+  jailRoot: string,
+): string | null {
   const root = path.resolve(jailRoot);
   const target = path.resolve(candidate);
   if (target !== root && !target.startsWith(root + path.sep)) return null;
@@ -100,7 +129,8 @@ export function resolveExistingFile(candidate: string, jailRoot: string): string
     return null;
   }
 
-  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
+  if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep))
+    return null;
   return realTarget;
 }
 

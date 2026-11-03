@@ -6,7 +6,11 @@ import { getConfig } from '../config';
 import { db } from '../db';
 import HttpError from '../models/http-error';
 import { buildObjectKey, getObjectStorage } from '../storage/s3-storage';
-import { resolveAssetFile, resolveStorageFile } from '../util/paths';
+import {
+  resolveAssetFile,
+  resolveStorageFile,
+  resolvePrivateFile,
+} from '../util/paths';
 
 /** List active records in the dedicated CDN database with bounded search and pagination. */
 export async function listMedia(
@@ -37,6 +41,7 @@ export async function listMedia(
         take: 24,
         select: {
           id: true,
+          isPublic: true,
           originalName: true,
           fileName: true,
           size: true,
@@ -83,7 +88,9 @@ export async function deleteMedia(
       ]);
     } else {
       let target: string | null;
-      if (pathname === `/storage/${file.fileName}`)
+      if (!file.isPublic && pathname === `/private/${file.fileName}`)
+        target = resolvePrivateFile(file.fileName);
+      else if (pathname === `/storage/${file.fileName}`)
         target = resolveStorageFile(file.fileName);
       else if (pathname === `/assets/${file.fileName}`)
         target = resolveAssetFile(file.fileName.split('/'));

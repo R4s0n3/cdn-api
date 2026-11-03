@@ -187,3 +187,50 @@ PostgreSQL before deleting them. There is no durable background reconciliation q
 The reference client rejects cleartext remote HTTP origins; loopback development
 origins remain supported. Conditional S3 requests use ETags/dates to avoid downloading
 unchanged files, and an ambiguous HEAD 404 checks bucket health before returning 404.
+
+
+## Private client files and download shares
+
+New uploads through the panel Media library are private by default. The panel
+first checks `/api/upload/capabilities`, then uploads with the authenticated
+`X-Upload-Visibility: private` header. Private single/bulk uploads are stored under
+`SERVER_ROOT/private`, outside the public storage and asset roots. This remains
+true in S3 mode, so private client bytes are never placed in a public bucket.
+Keep the CDN's `/data` volume persistent and size it for client files.
+
+Public website and sponsor upload integrations keep their existing behavior.
+Legacy File rows are marked public by the additive migration to avoid breaking
+existing websites. The panel shows this distinction and offers an explicit
+**Make private** action: it copies the selected public origin file into the private
+area, removes the public origin copy, then updates metadata. Private copies are
+retained for retries if the metadata update fails. Existing share links for that
+file need to be recreated after the revision changes. Previously cached or
+downloaded copies cannot be withdrawn.
+
+- `GET /api/upload/files/:id/download`: authenticated backend-only private reads;
+  safe raster previews can request `?preview=1`. The panel checks the current
+  owner session before proxying those bytes through `/api/media/:id`.
+- `POST /api/upload/files/:id/private`: authenticated, explicit privacy conversion.
+- `POST /api/upload/shares`: JSON `{ title, fileIds, expiresInDays }` for 1–50 files
+  and 1, 7, or 30 days (default 7). The random token is returned once; only its
+  SHA-256 hash is stored.
+- `GET /api/upload/shares?page=0`: paginated owner metadata, 20 shares per page.
+- `DELETE /api/upload/shares/:id`: revoke future access without deleting files.
+- `GET /share/:token`: only the chosen filenames/sizes and current availability.
+- `GET` or `HEAD /share/:token/files/:fileId`: stream that selected file as an
+  attachment after checking expiry, revocation, and its snapshotted revision.
+
+Private reads and share downloads use private/no-store cache headers. Share
+requests are rate limited and server error logs redact bearer tokens. Deleted or
+replaced files stop being downloadable through previous shares. Anyone holding a
+share link can download until expiry or revocation; existing public source
+permalinks remain accessible until explicitly moved/deleted. No upload or share
+API provides anonymous storage listings, and public directories are not listed.
+Public website assets can still be collected from the website displaying them;
+CORS/domain checks do not make public images confidential. Shares are not an
+antivirus certification, and downloaded copies cannot be recalled.
+
+Deploy CDN main first. Its existing migration entrypoint adds `File.isPublic`,
+`MediaShare`, and `MediaShareFile`. Then deploy panel main. No extra credentials
+or panel schema changes are required. There is no automatic mass conversion of
+existing public website/sponsor assets.

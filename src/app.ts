@@ -1,3 +1,4 @@
+import shareRoutes from './routes/share-routes';
 import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
@@ -94,6 +95,7 @@ export function createApp(config?: AppConfig) {
   app.use('/api', apiLimiter);
   app.use('/api', express.json({ limit: '1mb' }));
   app.use('/api/upload', uploadRoutes);
+  app.use('/share', shareRoutes);
 
   if (!config || process.env.SERVER_ROOT) {
     app.use('/storage', storageFiles);

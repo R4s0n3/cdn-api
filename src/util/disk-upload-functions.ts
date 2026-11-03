@@ -6,7 +6,7 @@ import multer from 'multer';
 import { v7 as uuidV7 } from 'uuid';
 import { maxUploadBytes } from '../config';
 import { extensionForMime } from './content-types';
-import { storageDirectory } from './paths';
+import { storageDirectory, privateStorageDirectory } from './paths';
 
 export const uploadLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -24,26 +24,41 @@ export const strictUploadLimit = rateLimit({
   legacyHeaders: false,
 });
 
-function fileFilter(_req: Express.Request, file: Express.Multer.File, cb: multer.FileFilterCallback) {
+function fileFilter(
+  _req: Express.Request,
+  file: Express.Multer.File,
+  cb: multer.FileFilterCallback,
+) {
   if (extensionForMime(file.mimetype)) {
     cb(null, true);
     return;
   }
-  cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.'));
+  cb(
+    new Error(
+      'Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.',
+    ),
+  );
 }
 
 function uploadFileName(file: Express.Multer.File): string {
   const ext = extensionForMime(file.mimetype);
   if (!ext) {
-    throw new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.');
+    throw new Error(
+      'Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.',
+    );
   }
   return `${uuidV7()}.${ext}`;
 }
 
 const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
+  destination: (req, _file, cb) => {
     try {
-      cb(null, storageDirectory());
+      cb(
+        null,
+        req.header('X-Upload-Visibility') === 'private'
+          ? privateStorageDirectory()
+          : storageDirectory(),
+      );
     } catch (error) {
       cb(error as Error, '');
     }
@@ -87,7 +102,12 @@ export const assetUpload = multer({
       try {
         const ext = extensionForMime(file.mimetype);
         if (!ext) {
-          cb(new Error('Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.'), '');
+          cb(
+            new Error(
+              'Invalid file type. Only JPEG, PNG, GIF, WebP, AVIF, SVG, PDF, and ZIP files are allowed.',
+            ),
+            '',
+          );
           return;
         }
         cb(null, `${uuidV7()}.${ext}`);

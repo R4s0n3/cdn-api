@@ -17,4 +17,33 @@ model File {
     createdAt    DateTime  @default(now())
     updatedAt    DateTime  @updatedAt
     deletedAt    DateTime?
+    isPublic     Boolean @default(true)
+    shareFiles   MediaShareFile[]
+}
+
+
+model MediaShare {
+    id        String   @id @default(cuid())
+    title     String   @db.VarChar(120)
+    tokenHash String   @unique @db.VarChar(64)
+    expiresAt DateTime
+    revokedAt DateTime?
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+    files     MediaShareFile[]
+
+    @@index([createdAt])
+}
+
+model MediaShareFile {
+    shareId       String
+    fileId        String
+    name          String
+    size          Int
+    fileUpdatedAt DateTime
+    share         MediaShare @relation(fields: [shareId], references: [id], onDelete: Cascade)
+    file          File       @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+    @@id([shareId, fileId])
+    @@index([fileId])
 }

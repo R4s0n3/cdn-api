@@ -52,13 +52,14 @@ function assetPathFromRequest(req: Request): string {
   return '';
 }
 
-function storedFile(file: Express.Multer.File) {
+function storedFile(file: Express.Multer.File, isPublic = true) {
   return {
     originalName: file.originalname,
     fileName: file.filename,
     size: file.size,
     mimeType: file.mimetype,
-    url: `/storage/${file.filename}`,
+    isPublic,
+    url: `${isPublic ? '/storage' : '/private'}/${file.filename}`,
   };
 }
 
@@ -72,7 +73,10 @@ const uploadControllers = {
       return;
     }
 
-    const record = storedFile(req.file);
+    const record = storedFile(
+      req.file,
+      req.header('X-Upload-Visibility') !== 'private',
+    );
     try {
       await validateZipFile(req.file);
       const createdFile = await db.file.create({
@@ -83,6 +87,7 @@ const uploadControllers = {
         files: [
           {
             id: createdFile.id,
+            isPublic: record.isPublic,
             filename: req.file.filename,
             originalName: req.file.originalname,
             size: req.file.size,
@@ -109,7 +114,9 @@ const uploadControllers = {
       return;
     }
 
-    const files = uploaded.map(storedFile);
+    const files = uploaded.map((file) =>
+      storedFile(file, req.header('X-Upload-Visibility') !== 'private'),
+    );
     try {
       for (const file of uploaded) await validateZipFile(file);
       await db.$transaction(async (prisma) => {
