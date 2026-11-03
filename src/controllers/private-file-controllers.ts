@@ -1,3 +1,4 @@
+import { streamPrivateObject } from '../storage/private-download';
 import { type Request, type Response, type NextFunction } from 'express';
 import { z } from 'zod';
 import { db } from '../db';
@@ -19,6 +20,20 @@ export async function downloadOwnerFile(
     });
     if (!file || file.isPublic || file.url !== `/private/${file.fileName}`)
       throw new HttpError('File not found', 404);
+    if (file.privateBucket && file.privateObjectKey) {
+      await streamPrivateObject(
+        req,
+        res,
+        {
+          privateBucket: file.privateBucket,
+          privateObjectKey: file.privateObjectKey,
+          name: file.originalName || file.fileName,
+          mimeType: file.mimeType,
+        },
+        req.query.preview === '1',
+      );
+      return;
+    }
     const absolute = resolvePrivateFile(file.fileName);
     if (!absolute) throw new HttpError('File not found', 404);
     const preview =

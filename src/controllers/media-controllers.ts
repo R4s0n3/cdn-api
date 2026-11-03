@@ -1,3 +1,4 @@
+import { getPrivateStorage } from '../storage/private-storage';
 import { type NextFunction, type Request, type Response } from 'express';
 import { unlink } from 'node:fs/promises';
 import { z } from 'zod';
@@ -42,6 +43,7 @@ export async function listMedia(
         select: {
           id: true,
           isPublic: true,
+          privateBucket: true,
           originalName: true,
           fileName: true,
           size: true,
@@ -52,7 +54,13 @@ export async function listMedia(
       }),
       db.file.count({ where }),
     ]);
-    res.json({ files, total });
+    res.json({
+      files: files.map(({ privateBucket, ...file }) => ({
+        ...file,
+        needsS3Migration: !file.isPublic && !privateBucket,
+      })),
+      total,
+    });
   } catch (error) {
     next(error);
   }
@@ -75,7 +83,11 @@ export async function deleteMedia(
     const pathname = new URL(file.url, 'http://cdn.invalid').pathname;
     // Derive the stored cluster from the URL; key/salt rotation must not change deletion targets.
     const cluster = /\/([a-z0-9]{12})\/[^/]+$/.exec(pathname)?.[1];
-    if (cluster && process.env.S3_ENDPOINT) {
+    if (!file.isPublic && file.privateBucket && file.privateObjectKey) {
+      await getPrivateStorage(file.privateBucket).deleteObjects([
+        file.privateObjectKey,
+      ]);
+    } else if (cluster && process.env.S3_ENDPOINT) {
       if (
         !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$/.test(file.fileName) ||
         file.fileName.includes('..') ||

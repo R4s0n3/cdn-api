@@ -10,6 +10,7 @@ import {
   type HeadObjectCommandOutput,
 } from '@aws-sdk/client-s3';
 import { createReadStream } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 
 import { getConfig, type AppConfig } from '../config';
 
@@ -95,6 +96,59 @@ export class S3Storage {
       await new Promise((resolve) =>
         setTimeout(resolve, Math.min(1000, 100 * 2 ** (attempt - 1))),
       );
+    }
+  }
+
+  /** Check anonymous read/list denial using harmless bytes before accepting private client content. */
+  async verifyPrivateAccess(): Promise<void> {
+    const key = [this.config.keyPrefix, 'private', `probe-${randomUUID()}`]
+      .filter(Boolean)
+      .join('/');
+    const bucketUrl = new URL(this.config.endpoint);
+    if (this.config.forcePathStyle)
+      bucketUrl.pathname = `/${this.config.bucket}/`;
+    else {
+      bucketUrl.hostname = `${this.config.bucket}.${bucketUrl.hostname}`;
+      bucketUrl.pathname = '/';
+    }
+    const objectUrl = new URL(
+      key.split('/').map(encodeURIComponent).join('/'),
+      bucketUrl,
+    );
+    const listUrl = new URL(bucketUrl);
+    listUrl.search = new URLSearchParams({
+      'list-type': '2',
+      'max-keys': '1',
+      prefix: [this.config.keyPrefix, 'private', '']
+        .filter((part, index) => part || index === 2)
+        .join('/'),
+    }).toString();
+    try {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: this.config.bucket,
+          Key: key,
+          Body: Buffer.from('private-storage-verification'),
+          ContentType: 'application/octet-stream',
+          CacheControl: 'no-store',
+        }),
+      );
+      for (const url of [objectUrl, listUrl]) {
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: url === objectUrl ? { Range: 'bytes=0-0' } : {},
+          redirect: 'error',
+          cache: 'no-store',
+          signal: AbortSignal.timeout(10000),
+        });
+        void response.body?.cancel().catch(() => undefined);
+        if (![401, 403].includes(response.status))
+          throw new Error(
+            'Private S3 storage must reject anonymous object reads and listings',
+          );
+      }
+    } finally {
+      await this.deleteObjects([key]);
     }
   }
 

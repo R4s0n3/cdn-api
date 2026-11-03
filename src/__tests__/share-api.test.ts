@@ -1,6 +1,13 @@
 import { Readable } from 'node:stream';
 import { createHash } from 'node:crypto';
-import { mkdtemp, mkdir, writeFile, rm, symlink } from 'node:fs/promises';
+import {
+  readFile,
+  mkdtemp,
+  mkdir,
+  writeFile,
+  rm,
+  symlink,
+} from 'node:fs/promises';
 import { type Server } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,9 +34,17 @@ const mocks = vi.hoisted(() => ({
   update: vi.fn(),
   getObject: vi.fn(),
   headObject: vi.fn(),
+  privateUpload: vi.fn(),
+  privateGet: vi.fn(),
+  privateHead: vi.fn(),
+  privateDelete: vi.fn(),
+  privateVerify: vi.fn(),
+  privateObjects: new Map<string, Buffer>(),
 }));
 vi.mock('../db', () => ({
   db: {
+    $transaction: (callback: (tx: unknown) => Promise<unknown>) =>
+      callback({ file: { create: mocks.createFile } }),
     file: {
       findMany: mocks.files,
       findFirst: mocks.findFile,
@@ -57,6 +72,19 @@ vi.mock('../storage/s3-storage', async (importOriginal) => ({
     deleteObjects: mocks.deleteObjects,
   }),
 }));
+vi.mock('../storage/private-storage', () => ({
+  privateStorageLocation: (filename: string) => ({
+    bucket: 'private-test',
+    key: `private/${filename}`,
+  }),
+  getPrivateStorage: () => ({
+    uploadFile: mocks.privateUpload,
+    getObject: mocks.privateGet,
+    headObject: mocks.privateHead,
+    deleteObjects: mocks.privateDelete,
+    verifyPrivateAccess: mocks.privateVerify,
+  }),
+}));
 const date = new Date('2026-01-01T00:00:00Z');
 const source = {
   id: 'file-1',
@@ -64,6 +92,8 @@ const source = {
   originalName: 'client files.zip',
   mimeType: 'application/zip',
   isPublic: true,
+  privateBucket: null as string | null,
+  privateObjectKey: null as string | null,
   size: 12,
   updatedAt: date,
   deletedAt: null as Date | null,
@@ -111,6 +141,32 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   vi.clearAllMocks();
+  mocks.privateObjects.clear();
+  mocks.privateVerify.mockResolvedValue(undefined);
+  mocks.privateUpload.mockImplementation(
+    async (key: string, file: { path: string }) => {
+      mocks.privateObjects.set(key, await readFile(file.path));
+    },
+  );
+  mocks.privateGet.mockImplementation((key: string) => {
+    const bytes = mocks.privateObjects.get(key);
+    return bytes
+      ? Promise.resolve({
+          Body: Readable.from([bytes]),
+          ContentLength: bytes.length,
+        })
+      : Promise.reject({ name: 'NoSuchKey' });
+  });
+  mocks.privateHead.mockImplementation((key: string) => {
+    const bytes = mocks.privateObjects.get(key);
+    return bytes
+      ? Promise.resolve({ ContentLength: bytes.length })
+      : Promise.reject({ name: 'NotFound' });
+  });
+  mocks.privateDelete.mockImplementation((keys: string[]) => {
+    for (const key of keys) mocks.privateObjects.delete(key);
+    return Promise.resolve();
+  });
   await writeFile(path.join(root, 'storage', 'test.zip'), 'shared-bytes');
   await rm(path.join(root, 'private'), { recursive: true, force: true });
   vi.stubEnv('S3_ENDPOINT', '');
@@ -208,6 +264,11 @@ describe('client media shares', () => {
     await anonymous.arrayBuffer();
     const privateFile = {
       ...source,
+      ...(
+        mocks.createFile.mock.calls[0]?.[0] as {
+          data: { privateBucket: string; privateObjectKey: string };
+        }
+      ).data,
       id: saved.id,
       fileName: saved.filename,
       originalName: 'client.zip',
@@ -239,14 +300,13 @@ describe('client media shares', () => {
     expect(revoked.status).toBe(404);
     await revoked.arrayBuffer();
   });
-  it('moves an existing public file into private storage only after explicit authenticated action', async () => {
+  it('moves an existing public file into private S3 storage only after explicit authenticated action', async () => {
     const record = { ...source };
+    share.files[0]!.file = record;
     mocks.findFile.mockResolvedValue(record);
     mocks.fileUpdate.mockImplementation(
       ({ data }: { data: Partial<typeof source> }) => {
-        Object.assign(record, data, {
-          updatedAt: new Date(date.getTime() + 1),
-        });
+        Object.assign(record, data);
         return Promise.resolve({ count: 1 });
       },
     );
@@ -275,8 +335,11 @@ describe('client media shares', () => {
     });
     expect(owner.status).toBe(200);
     expect(await owner.text()).toBe('shared-bytes');
+    const existingShare = await request(`/share/${token}/files/${record.id}`);
+    expect(existingShare.status).toBe(200);
+    expect(await existingShare.text()).toBe('shared-bytes');
   });
-  it('can recover a privacy move after public deletion succeeds but the database update fails', async () => {
+  it('can recover an S3 privacy move after public deletion succeeds but the database update fails', async () => {
     const record = { ...source };
     mocks.findFile.mockResolvedValue(record);
     mocks.fileUpdate
@@ -362,6 +425,30 @@ describe('client media shares', () => {
     });
     expect(response.status).toBe(400);
     await response.arrayBuffer();
+  });
+  it('does not upload client bytes if S3 privacy verification fails', async () => {
+    mocks.privateVerify.mockRejectedValueOnce(
+      new Error('anonymous reads allowed'),
+    );
+    const bytes = Buffer.alloc(22);
+    bytes.writeUInt32LE(0x06054b50);
+    const form = new FormData();
+    form.set(
+      'file',
+      new File([bytes], 'private.zip', { type: 'application/zip' }),
+    );
+    const response = await request('/api/upload/single', {
+      method: 'POST',
+      headers: {
+        'X-API-Key': 'owner-server-key',
+        'X-Upload-Visibility': 'private',
+      },
+      body: form,
+    });
+    expect(response.status).toBe(503);
+    await response.arrayBuffer();
+    expect(mocks.privateUpload).not.toHaveBeenCalled();
+    expect(mocks.createFile).not.toHaveBeenCalled();
   });
   it('requires the deployment key for every management endpoint', async () => {
     for (const [method, url] of [

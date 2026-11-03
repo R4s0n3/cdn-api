@@ -1,3 +1,4 @@
+import { streamPrivateObject } from '../storage/private-download';
 import { createHash, randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -217,6 +218,15 @@ export async function downloadShareFile(
     )
       throw noShare();
     const file = link.file;
+    if (!file.isPublic && file.privateBucket && file.privateObjectKey) {
+      await streamPrivateObject(req, res, {
+        privateBucket: file.privateBucket,
+        privateObjectKey: file.privateObjectKey,
+        name: link.name,
+        mimeType: file.mimeType,
+      });
+      return;
+    }
     const filename =
       path
         .basename(link.name.replace(/\\/g, '/'))

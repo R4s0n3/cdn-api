@@ -193,18 +193,21 @@ unchanged files, and an ambiguous HEAD 404 checks bucket health before returning
 
 New uploads through the panel Media library are private by default. The panel
 first checks `/api/upload/capabilities`, then uploads with the authenticated
-`X-Upload-Visibility: private` header. Private single/bulk uploads are stored under
-`SERVER_ROOT/private`, outside the public storage and asset roots. This remains
-true in S3 mode, so private client bytes are never placed in a public bucket.
-Keep the CDN's `/data` volume persistent and size it for client files.
+`X-Upload-Visibility: private` header. Private single/bulk uploads use S3 exclusively; disk is temporary staging only.
+The configured S3 bucket is reused only after a harmless canary verifies anonymous
+object reads and private-prefix listings are denied. Set S3_PRIVATE_BUCKET to a
+separate private bucket if needed. A separate private bucket is required when
+S3_PUBLIC_BASE_URL is configured. Verification failure stops the upload; there is
+no silent disk fallback. Exact object bucket/key metadata are persisted in PostgreSQL.
 
 Public website and sponsor upload integrations keep their existing behavior.
 Legacy File rows are marked public by the additive migration to avoid breaking
 existing websites. The panel shows this distinction and offers an explicit
-**Make private** action: it copies the selected public origin file into the private
-area, removes the public origin copy, then updates metadata. Private copies are
-retained for retries if the metadata update fails. Existing share links for that
-file need to be recreated after the revision changes. Previously cached or
+**Make private** action that moves the public origin copy into verified private S3.
+Legacy private disk files show **Move to S3**. Only temporary processing uses local
+disk; successful operations store the file in S3, remove its old source copy, and
+preserve its content revision and existing share links. Keep any legacy data
+volume until those existing local files have been migrated. Previously cached or
 downloaded copies cannot be withdrawn.
 
 - `GET /api/upload/files/:id/download`: authenticated backend-only private reads;
@@ -234,3 +237,11 @@ Deploy CDN main first. Its existing migration entrypoint adds `File.isPublic`,
 `MediaShare`, and `MediaShareFile`. Then deploy panel main. No extra credentials
 or panel schema changes are required. There is no automatic mass conversion of
 existing public website/sponsor assets.
+
+
+Private S3 correction adds nullable File.privateBucket and File.privateObjectKey
+columns. Deploy the CDN migration first, then the panel. Existing private disk
+reads remain supported during migration, but all new private uploads require S3.
+S3 credentials remain server-side and the share page streams selected objects
+without exposing bucket URLs or credentials. S3 itself is persistent object
+storage and does not require a local persistent volume for completed S3 uploads.

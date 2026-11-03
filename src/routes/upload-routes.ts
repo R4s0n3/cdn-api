@@ -1,3 +1,8 @@
+import { uploadPrivateFiles } from '../controllers/private-upload-controllers';
+import {
+  getPrivateStorage,
+  privateStorageLocation,
+} from '../storage/private-storage';
 import { makeFilePrivate } from '../controllers/file-privacy-controllers';
 import { downloadOwnerFile } from '../controllers/private-file-controllers';
 import HttpError from '../models/http-error';
@@ -25,9 +30,17 @@ const router = express.Router();
 router.get('/', uploadControllers.getHealth);
 
 router.use(validateKey);
-router.get('/capabilities', (_req, res) => {
+router.get('/capabilities', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
-  res.json({ privateMedia: true, mediaShares: true });
+  let privateMedia = false;
+  try {
+    const location = privateStorageLocation('capability-check');
+    await getPrivateStorage(location.bucket).verifyPrivateAccess();
+    privateMedia = true;
+  } catch {
+    /* Fail closed until S3 is configured. */
+  }
+  res.json({ privateMedia, mediaShares: true, privateStorage: 's3' });
 });
 router.use((req, _res, next) => {
   const visibility = req.header('X-Upload-Visibility');
@@ -44,6 +57,14 @@ router.use((req, _res, next) => {
     next(new HttpError('Invalid upload visibility', 400));
     return;
   }
+  if (visibility === 'private') {
+    try {
+      privateStorageLocation('configuration-check');
+    } catch (error) {
+      next(error);
+      return;
+    }
+  }
   next();
 });
 router.get('/files/:id/download', privateShareHeaders, downloadOwnerFile);
@@ -55,12 +76,12 @@ router.delete('/shares/:id', revokeShare);
 router.get('/files', listMedia);
 router.delete('/files/:id', deleteMedia);
 
-// Private uploads always use the non-public persistent volume, never a public S3 bucket.
+// Private uploads use temporary staging followed by verified private S3 storage.
 const publicUpload: typeof upload = process.env.S3_ENDPOINT ? s3Upload : upload;
 const publicControllers = process.env.S3_ENDPOINT
   ? s3Controllers
   : uploadControllers;
-const privateUpload = upload.single('file');
+const privateUpload = s3Upload.single('file');
 const defaultUpload = publicUpload.single('file');
 router.post(
   '/single',
@@ -71,14 +92,14 @@ router.post(
       : defaultUpload)(req, res, next);
   },
   (req, res, next) => {
-    void (
-      req.header('X-Upload-Visibility') === 'private'
-        ? uploadControllers
-        : publicControllers
-    ).uploadFile(req, res, next);
+    if (req.header('X-Upload-Visibility') === 'private') {
+      void uploadPrivateFiles(req, res, next);
+      return;
+    }
+    void publicControllers.uploadFile(req, res, next);
   },
 );
-const privateBulk = upload.array('files', 5);
+const privateBulk = s3Upload.array('files', 5);
 const defaultBulk = publicUpload.array('files', 5);
 router.post(
   '/bulk',
@@ -89,11 +110,11 @@ router.post(
       : defaultBulk)(req, res, next);
   },
   (req, res, next) => {
-    void (
-      req.header('X-Upload-Visibility') === 'private'
-        ? uploadControllers
-        : publicControllers
-    ).bulkUpload(req, res, next);
+    if (req.header('X-Upload-Visibility') === 'private') {
+      void uploadPrivateFiles(req, res, next);
+      return;
+    }
+    void publicControllers.bulkUpload(req, res, next);
   },
 );
 

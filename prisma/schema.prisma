@@ -18,6 +18,8 @@ model File {
     updatedAt    DateTime  @updatedAt
     deletedAt    DateTime?
     isPublic     Boolean @default(true)
+    privateBucket String?
+    privateObjectKey String?
     shareFiles   MediaShareFile[]
 }
 
