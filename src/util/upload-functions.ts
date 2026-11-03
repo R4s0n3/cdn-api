@@ -37,6 +37,7 @@ const storage = multer.diskStorage({
     const mimeToExtension: Record<string, string> = {
       'image/jpeg': 'jpg',
       'image/png': 'png',
+      'image/gif': 'gif',
       'application/pdf': 'pdf',
       'application/zip': 'zip',
       'application/x-zip-compressed': 'zip',
@@ -55,6 +56,7 @@ const fileFilter = (
   const allowedTypes = [
     'image/jpeg',
     'image/png',
+    'image/gif',
     'application/pdf',
     'application/zip',
     'application/x-zip-compressed',
@@ -64,7 +66,7 @@ const fileFilter = (
     callback(null, true);
   } else {
     callback(
-      new HttpError('Only JPEG, PNG, PDF, and ZIP files are allowed', 415),
+      new HttpError('Only JPEG, PNG, GIF, PDF, and ZIP files are allowed', 415),
     );
   }
 };
@@ -81,7 +83,7 @@ export const upload = multer({
   fileFilter,
 });
 
-/** Verify JPEG, PNG, PDF, or ZIP signatures before sending staged content to S3. */
+/** Verify JPEG, PNG, GIF, PDF, or ZIP signatures before sending staged content to S3. */
 export async function validateFileContents(
   file: Express.Multer.File,
 ): Promise<void> {
@@ -93,6 +95,10 @@ export async function validateFileContents(
     const { bytesRead } = await handle.read(header, 0, header.length, 0);
     const bytes = header.subarray(0, bytesRead);
     const isValid =
+      (file.mimetype === 'image/gif' &&
+        ['GIF87a', 'GIF89a'].includes(
+          bytes.subarray(0, 6).toString('ascii'),
+        )) ||
       (file.mimetype === 'image/jpeg' &&
         bytes.length >= 3 &&
         bytes[0] === 0xff &&

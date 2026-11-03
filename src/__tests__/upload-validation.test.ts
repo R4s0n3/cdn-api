@@ -67,6 +67,11 @@ describe('validateFileContents', () => {
     });
   });
 
+  it('accepts GIF output produced by the public sponsor sanitizer', async () => {
+    const file = await createUploadedFile(Buffer.from('GIF89a'), 'image/gif');
+    await expect(validateFileContents(file)).resolves.toBeUndefined();
+  });
+
   it('rejects a payload whose bytes do not match the declared type', async () => {
     const file = await createUploadedFile(
       Buffer.from('this is not a PDF'),
